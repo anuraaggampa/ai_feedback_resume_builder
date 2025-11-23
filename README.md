@@ -123,7 +123,7 @@ cd resume_builder
 ### 2️⃣ Create a virtual environment
 ```bash
 python -m venv .venv
-.\.venv\Scriptsctivate
+.\.venv\Scripts.activate
 ```
 
 ### 3️⃣ Install dependencies
@@ -224,12 +224,6 @@ Model rewrites the entire resume:
 
 Pull requests are welcome!  
 Open an issue if you’d like features added.
-
----
-
-## 📜 License
-
-MIT License.
 
 ---
 
