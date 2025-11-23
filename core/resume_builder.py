@@ -87,7 +87,12 @@ VERY IMPORTANT – HOW TO USE THIS INPUT:
 1. Identity & Header
    - Infer the candidate's name from the original resume.
      * If you are not sure, use "Your Name".
-   - Infer the candidate's professional title (e.g., "Data Science Analyst").
+   - For the TITLE line:
+     * Prefer using the EXACT job title from the JD (e.g., "Equity Research Data Analyst")
+       if it honestly fits the candidate's domain and level.
+     * If the JD title is clearly mismatched or too senior, choose a close, truthful
+       variant that still uses the main JD keywords (e.g., "Senior Data Scientist" → 
+       "Data Scientist – Financial / Market Analytics").
    - Infer contact details (phone, email, location) only if clearly present.
      * If you are not sure, omit missing fields instead of hallucinating.
 
@@ -136,6 +141,8 @@ VERY IMPORTANT – HOW TO USE THIS INPUT:
    - No tables, emojis, icons, or 2-column layouts.
    - Use headings and bullet points.
    - Use JD keywords only where they match real experience.
+   - The TITLE line should be JD-aligned as described above to help ATS filters,
+     but must remain truthful to the candidate's background.
 
 STRUCTURE REQUIREMENT (CRITICAL):
 
@@ -148,6 +155,9 @@ Your output MUST follow EXACTLY this section order and heading structure in mark
 2) Second line: the candidate's TITLE, e.g.:
 
 Data Science Analyst
+
+   - This TITLE should normally reuse the JD's job title (or a very close variant)
+     when it honestly fits the candidate.
 
 3) Third line: contact line with phone, email, and location on one line.
    Example:
@@ -164,14 +174,15 @@ Summary
 
 Experience
 For each role:
-- Company Name Location
-- Job Title Dates
-- (Optional) One short line describing the company or team.
-- 3–7 bullet points, each:
-  - starting with a strong verb,
-  - written in an impact-focused way,
-  - including ≈metrics where possible,
-  - aligned to the JD.
+- Company Name | Location
+- Job Title | Dates
+- 3–6 bullet points.
+  - Put the MOST JD-RELEVANT, high-impact bullets FIRST (top 2–3 bullets).
+  - Group more routine or less relevant tasks lower in the list.
+  - Where possible, include ≈metrics (%, count, time saved, revenue impact, quality
+    improvement, etc.).
+  - Highlight tools, platforms, and methods that overlap with the JD
+    (e.g., Excel, Python, SQL, Power BI, Bloomberg, financial modeling).
 
 Education
 - Degree | Institution | Location (if known) | Years (if clearly known)
@@ -184,11 +195,16 @@ For each major achievement:
 Skills
 - A single line (or couple of lines) listing skills, separated by commas or slashes:
   Programming languages, tools, platforms, analytics skills, domain knowledge,
-  and soft skills. Ensure JD-relevant skills are clearly visible.
+  and soft skills.
+- Ensure JD-relevant skills are clearly visible and appear FIRST in the list.
+- For Excel-related skills, prefer the concise label "Advanced Excel" as the
+  main skill name; detailed formulas and features (INDEX-MATCH, XLOOKUP, ARRAY
+  formulas, Pivot Tables, Power Query, etc.) can be mentioned inside bullets
+  under Experience or Projects.
 
 Projects
 For each project:
-- Project Name Dates (if known)
+- Project Name | Dates (if known)
 - 1–3 bullet points describing:
   - The problem or goal,
   - What was built or analyzed,
@@ -223,6 +239,7 @@ JD_vs_RESUME_ANALYSIS:
 INTERVIEW_QA (list of objects with 'question' and 'answer'):
 {json.dumps(interview_qa, indent=2)}
 """
+
 
 
 def generate_single_jd_fit_resume(
@@ -331,6 +348,63 @@ UPDATED_RESUME (Markdown):
 
     score = max(0.0, min(1.0, score))
     return score, rationale
+
+def generate_tailoring_feedback(
+    jd_text: str,
+    original_resume: str,
+    updated_resume: str,
+) -> str:
+    """
+    Use the LLM to explain to the user WHY their resume was tailored this way
+    (title alignment, skills re-ranking, and experience refocus).
+    """
+    prompt = f"""
+You are a friendly resume coach similar to Enhancv.
+
+Explain to the candidate, in three short sections, why their resume was tailored
+for the given job description.
+
+Use the JOB DESCRIPTION, ORIGINAL_RESUME, and UPDATED_RESUME to be as specific
+as possible, but keep the tone simple and encouraging.
+
+Output STRICTLY in markdown with these exact headings:
+
+### Why we aligned your Title
+<1–3 conversational sentences>
+
+### Why we re-ranked your Skills
+<1–3 conversational sentences>
+
+### Why we refocused your Experience
+<1–3 conversational sentences>
+
+Focus on:
+- ATS filters on job titles and keywords,
+- pulling JD-relevant skills to the top of the Skills section,
+- reordering experience bullets so the most relevant, high-impact points appear first.
+
+JOB DESCRIPTION:
+{jd_text}
+
+---
+
+ORIGINAL_RESUME (before tailoring):
+{original_resume}
+
+---
+
+UPDATED_RESUME (after tailoring):
+{updated_resume}
+"""
+    return chat_completion(
+        system_msg=(
+            "You are a concise, friendly resume coach who explains tailoring "
+            "decisions in plain language."
+        ),
+        user_msg=prompt,
+        temperature=0.3,
+    )
+
 
 
 def generate_refined_resume_with_llm_judge(

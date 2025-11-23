@@ -7,6 +7,7 @@ from core.resume_builder import (
     generate_refined_resume_with_llm_judge,
     generate_pdf_from_markdown,
     generate_docx_from_markdown,
+    generate_tailoring_feedback,  # NEW: explanation helper
 )
 from core.skills_map import load_spacy_model, compute_keyword_freqs, make_wordcloud_html
 
@@ -20,15 +21,7 @@ def get_nlp():
 
 nlp = get_nlp()
 
-# ------------- Streamlit Config -------------
-
-st.set_page_config(
-    page_title="Super Resume Tailor – JD-Fit Builder",
-    page_icon="🧠",
-    layout="wide",
-)
-
-# ------------- Session State -------------
+# ---------------- Session State ----------------
 
 if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
@@ -42,6 +35,8 @@ if "final_score" not in st.session_state:
     st.session_state.final_score = None
 if "judge_rationale" not in st.session_state:
     st.session_state.judge_rationale = None
+if "tailoring_feedback" not in st.session_state:  # NEW
+    st.session_state.tailoring_feedback = None
 
 if "interview_qa" not in st.session_state:
     st.session_state.interview_qa = []
@@ -65,7 +60,13 @@ def reset_interview():
     st.session_state.last_question = None
 
 
-# ------------- Sidebar Navigation -------------
+# ---------------- Layout / Navigation ----------------
+
+st.set_page_config(
+    page_title="Super Resume Tailor – JD-Fit Builder",
+    page_icon="🧠",
+    layout="wide",
+)
 
 st.sidebar.title("Super Resume Tailor")
 page_choice = st.sidebar.radio(
@@ -83,16 +84,18 @@ st.sidebar.markdown(
     "3. Home → Generate JD-fit resume (LLM judge-refined)"
 )
 
-# ------------- HOME PAGE -------------
+# =====================================================
+#                     HOME PAGE
+# =====================================================
 
 if st.session_state.page == "Home":
     st.title("🧠 Super Resume Tailor – JD-Fit Resume Builder")
     st.caption(
-        "Upload JD & Resume → Analyze → (Optional) dynamic interview → "
-        "Generate an ATS-friendly JD-fit resume, refined by an LLM judge (>85% JD match, up to 3 attempts)."
+        "Upload JD & resume → Analyze → (Optional) interview → "
+        "Generate an ATS-friendly JD-fit resume, refined by an LLM judge."
     )
 
-    # Step 1 – Uploads
+    # -------- 1) Upload JD + Resume --------
     st.subheader("1️⃣ Upload Job Description & Resume")
     col_jd, col_res = st.columns(2)
 
@@ -133,7 +136,7 @@ if st.session_state.page == "Home":
         st.markdown("**Resume Text**")
         st.text_area("Resume Preview", resume_text_final, height=140)
 
-    # Step 2 – Analysis
+    # -------- 2) Analyze JD vs Resume --------
     st.subheader("2️⃣ Analyze JD–Resume Match (no changes yet)")
     analyze_btn = st.button(
         "🔍 Analyze JD–Resume Match",
@@ -144,10 +147,12 @@ if st.session_state.page == "Home":
     if analyze_btn:
         st.session_state.jd_text = jd_text_final
         st.session_state.resume_text = resume_text_final
+
         reset_interview()
         st.session_state.tailored_resume = None
         st.session_state.final_score = None
         st.session_state.judge_rationale = None
+        st.session_state.tailoring_feedback = None
 
         with st.spinner("Analyzing skills, tools, responsibilities and gaps..."):
             analysis_report = analyze_jd_vs_resume(jd_text_final, resume_text_final)
@@ -181,13 +186,17 @@ if st.session_state.page == "Home":
             st.session_state.page = "Interview"
             st.rerun()
 
-    # Step 4 – Generate JD-fit resume with LLM judge refinement
+    # -------- 4) Generate JD-fit Resume --------
     st.subheader("4️⃣ Generate JD-Fit, ATS-Friendly Resume (LLM judge-refined)")
 
     generate_btn = st.button(
         "✨ Generate JD-Fit Resume (refine up to 3 attempts)",
         type="primary",
-        disabled=not (st.session_state.analysis and st.session_state.resume_text and st.session_state.jd_text),
+        disabled=not (
+            st.session_state.analysis
+            and st.session_state.resume_text
+            and st.session_state.jd_text
+        ),
     )
 
     if generate_btn:
@@ -197,23 +206,37 @@ if st.session_state.page == "Home":
                 resume_text=st.session_state.resume_text,
                 analysis_text=st.session_state.analysis,
                 interview_qa=st.session_state.interview_qa,
-                target_score=0.85,
+                target_score=0.95,
                 max_attempts=3,
             )
+
         st.session_state.tailored_resume = result["resume"]
         st.session_state.final_score = result["score"]
         st.session_state.judge_rationale = result["judge_rationale"]
 
+        # 🔍 NEW: generate Enhancv-style explanation text (title / skills / experience)
+        st.session_state.tailoring_feedback = generate_tailoring_feedback(
+            jd_text=st.session_state.jd_text,
+            original_resume=st.session_state.resume_text,
+            updated_resume=st.session_state.tailored_resume,
+        )
+
+    # -------- Display JD-fit Resume + Feedback + Downloads --------
     if st.session_state.tailored_resume:
         st.markdown("### 5️⃣ Your JD-Fit, ATS-Friendly Resume")
         st.markdown(st.session_state.tailored_resume)
 
         if st.session_state.final_score is not None:
             pct = round(st.session_state.final_score * 100, 1)
-            st.markdown(f"**LLM Judge Match Score:** `{pct}%` (target ≥ 85%)")
+            st.markdown(f"**LLM Judge Match Score:** `{pct}%` ")
             if st.session_state.judge_rationale:
                 with st.expander("Judge Rationale (Why this score?)"):
                     st.markdown(st.session_state.judge_rationale)
+
+        # 🔍 NEW: show explanation block from generate_tailoring_feedback
+        if st.session_state.tailoring_feedback:
+            st.markdown("### 🔍 What changed and why")
+            st.markdown(st.session_state.tailoring_feedback)
 
         st.markdown("### ✅ ATS-Friendly Checklist")
         st.markdown(
@@ -224,9 +247,7 @@ if st.session_state.page == "Home":
             "- No tables, text boxes, or multi-column layouts."
         )
 
-        # Download options: Markdown, PDF, Word
         colA, colB, colC = st.columns(3)
-
         with colA:
             st.download_button(
                 "⬇️ Download as Markdown",
@@ -234,7 +255,6 @@ if st.session_state.page == "Home":
                 file_name="jd_fit_resume.md",
                 mime="text/markdown",
             )
-
         with colB:
             pdf_data = generate_pdf_from_markdown(st.session_state.tailored_resume)
             st.download_button(
@@ -243,7 +263,6 @@ if st.session_state.page == "Home":
                 file_name="jd_fit_resume.pdf",
                 mime="application/pdf",
             )
-
         with colC:
             docx_data = generate_docx_from_markdown(st.session_state.tailored_resume)
             st.download_button(
@@ -256,7 +275,9 @@ if st.session_state.page == "Home":
                 ),
             )
 
-# ------------- INTERVIEW PAGE -------------
+# =====================================================
+#                   INTERVIEW PAGE
+# =====================================================
 
 else:
     st.title("💬 Super Resume Tailor – Interview")
@@ -266,18 +287,23 @@ else:
         "- Next ones: tailor your resume to this JD."
     )
 
-    if not st.session_state.analysis or not st.session_state.jd_text or not st.session_state.resume_text:
+    if (
+        not st.session_state.analysis
+        or not st.session_state.jd_text
+        or not st.session_state.resume_text
+    ):
         st.warning(
             "You need to first go to the Home page, upload JD & resume, and run "
             "the JD–Resume analysis. Then come back here."
         )
     else:
         st.info(
-            "These questions are based on your current resume, the JD, and the gaps we detected. "
+            "These questions are based on your current resume, the JD, "
+            "and the gaps we detected. "
             "Try to mention real metrics, tools, and responsibilities."
         )
 
-        # Kick off first question if interview hasn't started
+        # Kick off first question
         if (
             not st.session_state.interview_chat
             and not st.session_state.interview_done
@@ -310,11 +336,12 @@ else:
                     {"role": "assistant", "content": ai_q}
                 )
 
-        # Render chat
+        # Render chat history
         for msg in st.session_state.interview_chat:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
+        # Answer box
         if not st.session_state.interview_done:
             user_input = st.chat_input("Type your answer here...")
             if user_input:
