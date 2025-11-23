@@ -1,0 +1,37 @@
+archive
+.env
+.venv
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# Streamlit cache
+.streamlit/
+.cache/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.tmp
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+
+# PDFs / DOCX outputs
+*.pdf
+*.docx
