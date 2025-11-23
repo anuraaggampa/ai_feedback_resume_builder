@@ -1,5 +1,7 @@
 import streamlit as st
+import json  # ✅ needed for json.loads
 
+from core.pdf_utils import extract_text_from_pdf
 from core.pdf_utils import extract_text_from_pdf
 from core.analysis import analyze_jd_vs_resume
 from core.interview import get_next_interview_question
@@ -7,35 +9,47 @@ from core.resume_builder import (
     generate_refined_resume_with_llm_judge,
     generate_pdf_from_markdown,
     generate_docx_from_markdown,
-    generate_tailoring_feedback,  # NEW: explanation helper
+    generate_tailoring_feedback,
 )
 from core.skills_map import load_spacy_model, compute_keyword_freqs, make_wordcloud_html
 
-MAX_QUESTIONS = 7
-
+MAX_QUESTIONS = 8
 
 @st.cache_resource
 def get_nlp():
     return load_spacy_model()
 
-
 nlp = get_nlp()
 
 # ---------------- Session State ----------------
+
+DEFAULT_WEIGHTS = {
+    "hard": 70,
+    "soft": 30
+}
 
 if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
 if "resume_text" not in st.session_state:
     st.session_state.resume_text = ""
+
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
+if "analysis_json" not in st.session_state:
+    st.session_state.analysis_json = None
+if "analysis_full" not in st.session_state:
+    st.session_state.analysis_full = None
+
+if "user_weighting" not in st.session_state:
+    st.session_state.user_weighting = DEFAULT_WEIGHTS.copy()
+
 if "tailored_resume" not in st.session_state:
     st.session_state.tailored_resume = None
 if "final_score" not in st.session_state:
     st.session_state.final_score = None
 if "judge_rationale" not in st.session_state:
     st.session_state.judge_rationale = None
-if "tailoring_feedback" not in st.session_state:  # NEW
+if "tailoring_feedback" not in st.session_state:
     st.session_state.tailoring_feedback = None
 
 if "interview_qa" not in st.session_state:
@@ -48,6 +62,7 @@ if "interview_done" not in st.session_state:
     st.session_state.interview_done = False
 if "last_question" not in st.session_state:
     st.session_state.last_question = None
+
 if "page" not in st.session_state:
     st.session_state.page = "Home"
 
@@ -81,19 +96,18 @@ st.sidebar.markdown(
     "**Flow:**\n"
     "1. Home → Upload & Analyze\n"
     "2. Interview → Answer AI questions\n"
-    "3. Home → Generate JD-fit resume (LLM judge-refined)"
+    "3. Home → Generate JD-fit resume (LLM judge refined)"
 )
+
 
 # =====================================================
 #                     HOME PAGE
 # =====================================================
 
 if st.session_state.page == "Home":
+
     st.title("🧠 Super Resume Tailor – JD-Fit Resume Builder")
-    st.caption(
-        "Upload JD & resume → Analyze → (Optional) interview → "
-        "Generate an ATS-friendly JD-fit resume, refined by an LLM judge."
-    )
+    st.caption("Upload JD & resume → Analyze → (Optional) interview → Build ATS-optimized resume")
 
     # -------- 1) Upload JD + Resume --------
     st.subheader("1️⃣ Upload Job Description & Resume")
@@ -101,24 +115,12 @@ if st.session_state.page == "Home":
 
     with col_jd:
         st.markdown("**Job Description**")
-        jd_file = st.file_uploader(
-            "Upload JD (PDF) – or use text input below",
-            type=["pdf"],
-            key="jd_file",
-        )
-        jd_text_manual = st.text_area(
-            "Or paste JD text here",
-            height=180,
-            placeholder="Paste the JD from LinkedIn / careers page...",
-        )
+        jd_file = st.file_uploader("Upload JD (PDF) – or paste manually", type=["pdf"])
+        jd_text_manual = st.text_area("Or paste JD text", height=180)
 
     with col_res:
         st.markdown("**Candidate Resume**")
-        resume_file = st.file_uploader(
-            "Upload Resume (PDF)",
-            type=["pdf"],
-            key="resume_file",
-        )
+        resume_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
 
     jd_text_final = ""
     if jd_file is not None:
@@ -130,16 +132,17 @@ if st.session_state.page == "Home":
     if resume_file is not None:
         resume_text_final = extract_text_from_pdf(resume_file)
 
-    with st.expander("Preview Parsed Text (optional)"):
-        st.markdown("**Job Description Text**")
-        st.text_area("JD Preview", jd_text_final, height=140)
-        st.markdown("**Resume Text**")
-        st.text_area("Resume Preview", resume_text_final, height=140)
+    with st.expander("Preview Parsed Text"):
+        st.markdown("### JD Preview")
+        st.text_area("JD", jd_text_final, height=140)
+        st.markdown("### Resume Preview")
+        st.text_area("Resume", resume_text_final, height=140)
 
     # -------- 2) Analyze JD vs Resume --------
-    st.subheader("2️⃣ Analyze JD–Resume Match (no changes yet)")
+    st.subheader("2️⃣ Analyze JD–Resume Match")
+
     analyze_btn = st.button(
-        "🔍 Analyze JD–Resume Match",
+        "🔍 Run JD–Resume Analysis",
         type="primary",
         disabled=not (jd_text_final and resume_text_final),
     )
@@ -154,43 +157,105 @@ if st.session_state.page == "Home":
         st.session_state.judge_rationale = None
         st.session_state.tailoring_feedback = None
 
-        with st.spinner("Analyzing skills, tools, responsibilities and gaps..."):
-            analysis_report = analyze_jd_vs_resume(jd_text_final, resume_text_final)
-        st.session_state.analysis = analysis_report
+        with st.spinner("Analyzing skills and gaps..."):
+            analysis_md = analyze_jd_vs_resume(jd_text_final, resume_text_final)
 
+        # Keep the full analysis (with JSON) for internal use
+        st.session_state.analysis_full = analysis_md
+
+        # ---------- Extract JSON from the JSON_BLOCK markers ----------
+        try:
+            start_marker = "JSON_BLOCK_START"
+            end_marker = "JSON_BLOCK_END"
+
+            start_idx = analysis_md.index(start_marker)
+            end_idx = analysis_md.index(end_marker, start_idx)
+
+            # visible markdown is everything before the marker
+            visible_md = analysis_md[:start_idx].rstrip()
+
+            # extract the JSON text between the markers
+            json_block = analysis_md[start_idx:end_idx]
+            brace_start = json_block.index("{")
+            brace_end = json_block.rindex("}")
+            json_str = json_block[brace_start:brace_end + 1]
+
+            st.session_state.analysis = visible_md
+            st.session_state.analysis_json = json.loads(json_str)
+
+        except Exception:
+            # Fallback: show full analysis text but drop JSON parsing
+            st.session_state.analysis = analysis_md
+            st.session_state.analysis_json = None
+            st.warning(
+                "Could not parse structured analysis JSON. "
+                "Hybrid weighting will fall back to defaults."
+            )
+
+            st.session_state.analysis_json = json.loads(json_str)
+        except Exception:
+            st.session_state.analysis_json = None
+            st.warning(
+                "Could not parse structured analysis JSON. "
+                "Hybrid weighting will fall back to defaults."
+            )
+
+    # display analysis results
     if st.session_state.analysis:
-        st.markdown("### 🧩 JD vs Resume Report")
+        st.markdown("### 🧩 JD vs Resume Analysis Report")
         st.markdown(st.session_state.analysis)
 
-        st.markdown("### ☁️ Skills Map (Word Cloud Style)")
+        # Skill maps
+        st.markdown("### ☁️ Skill Maps (Word Clouds)")
         jd_freqs = compute_keyword_freqs(nlp, st.session_state.jd_text)
         resume_freqs = compute_keyword_freqs(nlp, st.session_state.resume_text)
 
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### JD Skills Map")
-            st.caption("Keywords from the JD. Bigger = more frequent / important.")
             st.markdown(make_wordcloud_html(jd_freqs), unsafe_allow_html=True)
         with col2:
-            st.markdown("#### Candidate Skills Map")
-            st.caption("Keywords from your resume. Bigger = more frequently mentioned.")
+            st.markdown("#### Resume Skills Map")
             st.markdown(make_wordcloud_html(resume_freqs), unsafe_allow_html=True)
 
         st.info(
-            "This step only analyzes the fit. Your resume is not changed yet. "
-            "You can optionally go to the Interview page so the AI can ask you "
-            "targeted follow-up questions."
+            "You can now optionally go to the Interview page to fill missing details."
         )
 
-        if st.button("💬 Go to Interview (optional but recommended)"):
+        if st.button("💬 Go to Interview"):
             st.session_state.page = "Interview"
             st.rerun()
 
-    # -------- 4) Generate JD-fit Resume --------
-    st.subheader("4️⃣ Generate JD-Fit, ATS-Friendly Resume (LLM judge-refined)")
+    # -------- 3) Hybrid Weighting Controls --------
+    if st.session_state.analysis_json:
 
-    generate_btn = st.button(
-        "✨ Generate JD-Fit Resume (refine up to 3 attempts)",
+        st.subheader("3️⃣ Hybrid Skill Weighting (Auto + Override)")
+
+        role_type = st.session_state.analysis_json.get("role_type", "technical")
+
+        auto_hard = 70 if role_type == "technical" else 25
+        auto_soft = 30 if role_type == "technical" else 75
+
+        st.markdown(f"**Auto-detected role type:** `{role_type.upper()}`")
+
+        st.markdown("#### Auto weighting suggestion:")
+        st.write(f"Hard Skill Weight: **{auto_hard}%**")
+        st.write(f"Soft Skill Weight: **{auto_soft}%**")
+
+        st.markdown("#### Override weights (optional):")
+        hard_w = st.slider("Hard Skill Weight (%)", 0, 100, auto_hard)
+        soft_w = 100 - hard_w
+
+        st.session_state.user_weighting = {
+            "hard": hard_w,
+            "soft": soft_w
+        }
+
+    # -------- 4) Generate Resume --------
+    st.subheader("4️⃣ Generate JD-Fit Resume")
+
+    gen_btn = st.button(
+        "✨ Generate JD-Fit Resume (LLM judge refined)",
         type="primary",
         disabled=not (
             st.session_state.analysis
@@ -199,14 +264,16 @@ if st.session_state.page == "Home":
         ),
     )
 
-    if generate_btn:
-        with st.spinner("Building and refining your JD-fit resume..."):
+    if gen_btn:
+
+        with st.spinner("Generating & refining your resume..."):
             result = generate_refined_resume_with_llm_judge(
                 jd_text=st.session_state.jd_text,
                 resume_text=st.session_state.resume_text,
                 analysis_text=st.session_state.analysis,
                 interview_qa=st.session_state.interview_qa,
-                target_score=0.95,
+                user_weighting=st.session_state.user_weighting,
+                target_score=0.92,
                 max_attempts=3,
             )
 
@@ -214,43 +281,36 @@ if st.session_state.page == "Home":
         st.session_state.final_score = result["score"]
         st.session_state.judge_rationale = result["judge_rationale"]
 
-        # 🔍 NEW: generate Enhancv-style explanation text (title / skills / experience)
         st.session_state.tailoring_feedback = generate_tailoring_feedback(
             jd_text=st.session_state.jd_text,
             original_resume=st.session_state.resume_text,
             updated_resume=st.session_state.tailored_resume,
         )
 
-    # -------- Display JD-fit Resume + Feedback + Downloads --------
+    # -------- Display resume + feedback --------
     if st.session_state.tailored_resume:
-        st.markdown("### 5️⃣ Your JD-Fit, ATS-Friendly Resume")
+
+        st.markdown("### 5️⃣ Your JD-Fit Resume")
         st.markdown(st.session_state.tailored_resume)
 
         if st.session_state.final_score is not None:
-            pct = round(st.session_state.final_score * 100, 1)
-            st.markdown(f"**LLM Judge Match Score:** `{pct}%` ")
+            pct = round(st.session_state.final_score * 100, 2)
+            st.markdown(f"**LLM Judge Match Score:** `{pct}%`")
+
             if st.session_state.judge_rationale:
-                with st.expander("Judge Rationale (Why this score?)"):
+                with st.expander("Judge Rationale"):
                     st.markdown(st.session_state.judge_rationale)
 
-        # 🔍 NEW: show explanation block from generate_tailoring_feedback
         if st.session_state.tailoring_feedback:
             st.markdown("### 🔍 What changed and why")
             st.markdown(st.session_state.tailoring_feedback)
 
-        st.markdown("### ✅ ATS-Friendly Checklist")
-        st.markdown(
-            "- Single-column layout (recreate in Word/Docs).\n"
-            "- Clear section headings (Summary, Skills, Experience, etc.).\n"
-            "- Bullet points with strong action verbs and impact.\n"
-            "- JD keywords integrated where they match your real experience.\n"
-            "- No tables, text boxes, or multi-column layouts."
-        )
-
+        # downloads
         colA, colB, colC = st.columns(3)
+
         with colA:
             st.download_button(
-                "⬇️ Download as Markdown",
+                "⬇️ Markdown",
                 data=st.session_state.tailored_resume.encode("utf-8"),
                 file_name="jd_fit_resume.md",
                 mime="text/markdown",
@@ -258,7 +318,7 @@ if st.session_state.page == "Home":
         with colB:
             pdf_data = generate_pdf_from_markdown(st.session_state.tailored_resume)
             st.download_button(
-                "⬇️ Download as PDF",
+                "⬇️ PDF (Lato)",
                 data=pdf_data,
                 file_name="jd_fit_resume.pdf",
                 mime="application/pdf",
@@ -266,7 +326,7 @@ if st.session_state.page == "Home":
         with colC:
             docx_data = generate_docx_from_markdown(st.session_state.tailored_resume)
             st.download_button(
-                "⬇️ Download as Word",
+                "⬇️ Word (.docx)",
                 data=docx_data,
                 file_name="jd_fit_resume.docx",
                 mime=(
@@ -275,16 +335,16 @@ if st.session_state.page == "Home":
                 ),
             )
 
+
 # =====================================================
 #                   INTERVIEW PAGE
 # =====================================================
 
 else:
-    st.title("💬 Super Resume Tailor – Interview")
+
+    st.title("💬 Super Resume Tailor – Interview Mode")
     st.caption(
-        "The AI will ask up to 7 targeted questions.\n"
-        "- First 3: understand your previous roles.\n"
-        "- Next ones: tailor your resume to this JD."
+        "AI will ask up to 7 questions to gather deeper experience and missing skills."
     )
 
     if (
@@ -293,14 +353,12 @@ else:
         or not st.session_state.resume_text
     ):
         st.warning(
-            "You need to first go to the Home page, upload JD & resume, and run "
-            "the JD–Resume analysis. Then come back here."
+            "Please upload JD/Resume and run the analysis first."
         )
     else:
+
         st.info(
-            "These questions are based on your current resume, the JD, "
-            "and the gaps we detected. "
-            "Try to mention real metrics, tools, and responsibilities."
+            "These questions are based on JD gaps, resume content, and hybrid skill weighting."
         )
 
         # Kick off first question
@@ -309,7 +367,7 @@ else:
             and not st.session_state.interview_done
             and st.session_state.num_questions_asked == 0
         ):
-            ai_q = get_next_interview_question(
+            q = get_next_interview_question(
                 jd_text=st.session_state.jd_text,
                 resume_text=st.session_state.resume_text,
                 analysis_text=st.session_state.analysis,
@@ -317,60 +375,47 @@ else:
                 num_questions_asked=st.session_state.num_questions_asked,
                 max_questions=MAX_QUESTIONS,
             )
-            if ai_q.upper() == "DONE":
+
+            if q == "DONE":
                 st.session_state.interview_done = True
-                st.session_state.interview_chat.append(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            "Looks like your resume already has enough detail for this JD. "
-                            "You can go back to the Home page and click "
-                            "**“✨ Generate JD-Fit Resume”**."
-                        ),
-                    }
-                )
+                st.session_state.interview_chat.append({
+                    "role": "assistant",
+                    "content": "We already have enough information! Return to Home and generate your resume."
+                })
             else:
                 st.session_state.num_questions_asked += 1
-                st.session_state.last_question = ai_q
-                st.session_state.interview_chat.append(
-                    {"role": "assistant", "content": ai_q}
-                )
+                st.session_state.last_question = q
+                st.session_state.interview_chat.append({"role": "assistant", "content": q})
 
         # Render chat history
         for msg in st.session_state.interview_chat:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Answer box
+        # User input
         if not st.session_state.interview_done:
-            user_input = st.chat_input("Type your answer here...")
+            user_input = st.chat_input("Your answer...")
             if user_input:
+
                 st.session_state.interview_chat.append(
                     {"role": "user", "content": user_input}
                 )
-                if st.session_state.last_question:
-                    st.session_state.interview_qa.append(
-                        {
-                            "question": st.session_state.last_question,
-                            "answer": user_input,
-                        }
-                    )
 
+                if st.session_state.last_question:
+                    st.session_state.interview_qa.append({
+                        "question": st.session_state.last_question,
+                        "answer": user_input,
+                    })
+
+                # max question reached
                 if st.session_state.num_questions_asked >= MAX_QUESTIONS:
                     st.session_state.interview_done = True
-                    st.session_state.interview_chat.append(
-                        {
-                            "role": "assistant",
-                            "content": (
-                                "✅ Thanks! I now have enough information "
-                                f"(we reached the limit of {MAX_QUESTIONS} questions). "
-                                "Go back to the Home page and click "
-                                "**“✨ Generate JD-Fit Resume”**."
-                            ),
-                        }
-                    )
+                    st.session_state.interview_chat.append({
+                        "role": "assistant",
+                        "content": "Thanks! Return to Home and click Generate Resume."
+                    })
                 else:
-                    ai_q = get_next_interview_question(
+                    q = get_next_interview_question(
                         jd_text=st.session_state.jd_text,
                         resume_text=st.session_state.resume_text,
                         analysis_text=st.session_state.analysis,
@@ -378,23 +423,17 @@ else:
                         num_questions_asked=st.session_state.num_questions_asked,
                         max_questions=MAX_QUESTIONS,
                     )
-                    if ai_q.upper() == "DONE":
+                    if q == "DONE":
                         st.session_state.interview_done = True
-                        st.session_state.interview_chat.append(
-                            {
-                                "role": "assistant",
-                                "content": (
-                                    "✅ Thank you, I have enough information to tailor "
-                                    "your resume to this JD. Go back to the Home page "
-                                    "and click **“✨ Generate JD-Fit Resume”**."
-                                ),
-                            }
-                        )
+                        st.session_state.interview_chat.append({
+                            "role": "assistant",
+                            "content": "Thanks! I have enough info now!"
+                        })
                     else:
                         st.session_state.num_questions_asked += 1
-                        st.session_state.last_question = ai_q
+                        st.session_state.last_question = q
                         st.session_state.interview_chat.append(
-                            {"role": "assistant", "content": ai_q}
+                            {"role": "assistant", "content": q}
                         )
 
     if st.button("⬅️ Back to Home"):
