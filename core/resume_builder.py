@@ -10,7 +10,7 @@ This file combines:
 ✔ Lato-based clean PDF export  
 ✔ Strict markdown output  
 """
-
+from .resume_extractor import extract_resume_to_json
 import io
 import json
 import re
@@ -33,6 +33,24 @@ from reportlab.lib.units import mm
 from docx import Document
 from core.openai_client import chat_completion
 
+import io  # you likely already have this for PDF; okay if duplicate
+import tempfile
+from typing import Optional
+
+from .resume_model import ResumeModel  # NEW
+
+# Optional dependencies for template-based exports
+try:
+    from docxtpl import DocxTemplate
+    DOCTPL_AVAILABLE = True
+except ImportError:
+    DOCTPL_AVAILABLE = False
+
+try:
+    from docx2pdf import convert as docx2pdf_convert
+    DOCX2PDF_AVAILABLE = True
+except ImportError:
+    DOCX2PDF_AVAILABLE = False
 
 # ============================================================
 # LATO FONT REGISTRATION (fallback → Helvetica)
@@ -254,7 +272,7 @@ def build_jd_fit_resume_prompt(
 
     return f"""
 You are an ATS-optimized resume writer with strict structure rules.
-
+important instructions:If the resume does not explicitly state years of experience
 ===============================================================
 ### HARD + SOFT SKILL GROUNDING (DO NOT IGNORE)
 Use these lists as the base dictionary:
@@ -349,7 +367,6 @@ Rules:
 - No icons except contact line emojis  
 - All bullets must start with strong verbs  
 - Summary must use the weighted skill clusters  
-
 ===============================================================
 JOB_DESCRIPTION:
 {jd_text}
@@ -475,6 +492,72 @@ UPDATED_RESUME:
 # ============================================================
 # MULTI-PASS REFINEMENT WITH LLM JUDGE
 # ============================================================
+def refine_resume_with_rechecker(resume_markdown: str) -> str:
+    """Second-pass LLM polish:
+    - Detect & rewrite AI-sounding, generic corporate phrases dynamically
+    - Split overly long / complex bullets into clearer, shorter ones
+    - Preserve structure, metrics, technologies, and ATS-friendly markdown
+    """
+
+    if not resume_markdown or not resume_markdown.strip():
+        return resume_markdown
+
+    system_msg = (
+        "You are a resume polishing assistant. "
+        "You make resumes sound human, specific, and concise while staying ATS-friendly."
+    )
+
+    user_msg = f"""
+important instructions:If the resume does not explicitly state years of experience,
+omit it entirely.
+You will receive a completed professional resume in Markdown format.
+
+Your goals:
+
+1) Dynamically detect and rewrite AI-sounding, generic, corporate, or over-used phrases.
+   - Examples of the *style* (do NOT hard-code a fixed list): "proven ability",
+     "results-driven professional", "highly skilled", "adept at leveraging",
+     "strong track record", "passionate about".
+   - Replace them with concrete, specific, outcome-based statements that keep the same meaning,
+     grounded in what is already written.
+
+2) Simplify and split overly long or complex bullets or sentences:
+   - Aim for at most ~22–25 words per bullet.
+   - Prefer at most one comma per bullet.
+   - If a bullet is too long or has multiple clauses, split it into 2 bullets, each clear and focused.
+   - Do NOT remove metrics, impact, or technologies; just rewrite for clarity.
+
+3) Preserve:
+   - All factual content, companies, roles, dates, technologies, and metrics.
+   - The overall resume structure: headings, sections, and bullet lists.
+   - ATS friendliness: keep Markdown headings (#, ##) and list markers (- or •). No tables, no fancy formatting.
+
+4) Do NOT invent new experiences, roles, or achievements. Only polish wording and structure.
+
+Return ONLY the improved resume in Markdown. Do NOT add explanations, comments, or JSON.
+
+RESUME (MARKDOWN):
+
+```markdown
+{resume_markdown}
+"""
+    try:
+        improved = chat_completion(
+            system_msg=system_msg,
+            user_msg=user_msg,
+            temperature=0.2,
+        )
+        improved = (improved or "").strip()
+        return improved or resume_markdown
+    except Exception:
+        return resume_markdown
+
+
+
+
+
+
+
 
 def generate_refined_resume_with_llm_judge(
     jd_text: str,
@@ -498,6 +581,7 @@ def generate_refined_resume_with_llm_judge(
 
     for attempt in range(1, max_attempts + 1):
 
+        # 1) Generate a single JD-fit resume candidate
         current = generate_single_jd_fit_resume(
             jd_text=jd_text,
             resume_text=resume_text,
@@ -508,6 +592,7 @@ def generate_refined_resume_with_llm_judge(
             judge_feedback=rationale,
         )
 
+        # 2) Score it with the strict judge
         score, rationale = score_resume_fit(
             jd_text=jd_text,
             resume_markdown=current,
@@ -515,15 +600,28 @@ def generate_refined_resume_with_llm_judge(
         )
         final_score = score
 
+        # 3) Early stop if we hit the target quality
         if score >= target_score:
             break
+    # ✅ After the judge loop completes — polish the resume
+    polished_resume = refine_resume_with_rechecker(current)
+    current = polished_resume
+
+    # ✅ Extract structured model from polished resume (for template export)
+    try:
+        resume_model = extract_resume_to_json(current)
+    except Exception:
+        resume_model = None
 
     return {
-        "resume": current,
+        "resume": current,            # ✅ UI now receives refined version
         "score": final_score,
         "attempts": attempt,
         "judge_rationale": rationale,
+        "resume_model": resume_model, # ✅ matches polished resume
     }
+
+
 
 
 # ============================================================
@@ -764,3 +862,148 @@ def generate_docx_from_markdown(md_text: str) -> bytes:
     doc.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+def generate_docx_from_model(resume: ResumeModel, template_path: str) -> bytes:
+    """
+    Render a DOCX resume using a Word template + ResumeModel.
+
+    This expects a template like the one we created with placeholders:
+      {{ NAME }}, {{ TITLE }}, {{ EMAIL }}, {{ PHONE }},
+      {{ LOCATION }}, {{ LINKEDIN }},
+      {{ SUMMARY }}, {{ SKILLS_INLINE }},
+      {% for job in EXPERIENCE %}...{% endfor %}, etc.
+    """
+    if not DOCTPL_AVAILABLE:
+        raise RuntimeError(
+            "docxtpl is not installed. Install it with `pip install docxtpl` "
+            "or use the markdown-based DOCX export."
+        )
+
+    doc = DocxTemplate(template_path)
+
+    context = {
+        "NAME": resume.name,
+        "TITLE": resume.title,
+        "EMAIL": resume.email,
+        "PHONE": resume.phone,
+        "LOCATION": resume.location,
+        "LINKEDIN": resume.linkedin,
+        "SUMMARY": resume.summary,
+        "SKILLS_INLINE": resume.skills_inline,
+        "EXPERIENCE": [
+            {
+                "role": item.role,
+                "company": item.company,
+                "location": item.location,
+                "start": item.start,
+                "end": item.end,
+                "bullets": item.bullets,
+            }
+            for item in (resume.experience or [])
+        ],
+        "EDUCATION": [
+            {
+                "degree": edu.degree,
+                "institution": edu.institution,
+                "location": edu.location,
+                "year": edu.year,
+            }
+            for edu in (resume.education or [])
+        ],
+        "ACHIEVEMENTS": list(resume.achievements or []),
+        "PROJECTS": [
+            {
+                "name": proj.name,
+                "bullets": proj.bullets,
+            }
+            for proj in (resume.projects or [])
+        ],
+    }
+
+    doc.render(context)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def generate_pdf_from_docx_bytes(docx_bytes: bytes) -> bytes:
+    """
+    Convert DOCX bytes → PDF bytes using docx2pdf.
+    Uses temporary files internally but returns a clean in-memory bytes object.
+    """
+    if not DOCX2PDF_AVAILABLE:
+        raise RuntimeError(
+            "docx2pdf is not installed. Install it with `pip install docx2pdf` "
+            "or use the markdown-based PDF export."
+        )
+
+    # Write DOCX to a temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_in:
+        tmp_in.write(docx_bytes)
+        tmp_in_path = tmp_in.name
+
+    # Prepare temp output path for PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
+        tmp_out_path = tmp_out.name
+
+    # Run conversion
+    docx2pdf_convert(tmp_in_path, tmp_out_path)
+
+    # Read PDF back into memory
+    with open(tmp_out_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    return pdf_bytes
+
+def generate_docx_export(
+    resume_model: Optional[ResumeModel],
+    md_text: str,
+    template_path: Optional[str] = None,
+) -> bytes:
+    """
+    Preferred DOCX export:
+    - If a structured ResumeModel AND a template_path are provided AND docxtpl is available:
+        → use the template-based DOCX export.
+    - Otherwise:
+        → fall back to the simple markdown-based DOCX export.
+    """
+    if resume_model is not None and template_path and DOCTPL_AVAILABLE:
+        try:
+            return generate_docx_from_model(resume_model, template_path)
+        except Exception:
+            # Optional: log or print debug; for now we silently fall back
+            pass
+
+    # Fallback: existing behavior
+    return generate_docx_from_markdown(md_text)
+
+
+def generate_pdf_export(
+    resume_model: Optional[ResumeModel],
+    md_text: str,
+    template_path: Optional[str] = None,
+) -> bytes:
+    """
+    Preferred PDF export:
+    - If ResumeModel + template_path + both docxtpl & docx2pdf are available:
+        → Template-based DOCX → PDF.
+    - Otherwise:
+        → fall back to existing markdown-based PDF (ReportLab).
+    """
+    if (
+        resume_model is not None
+        and template_path
+        and DOCTPL_AVAILABLE
+        and DOCX2PDF_AVAILABLE
+    ):
+        try:
+            docx_bytes = generate_docx_from_model(resume_model, template_path)
+            return generate_pdf_from_docx_bytes(docx_bytes)
+        except Exception:
+            # Optional: log failure; then fall back to markdown PDF
+            pass
+
+    # Fallback: existing behavior
+    return generate_pdf_from_markdown(md_text)

@@ -2,15 +2,19 @@ import streamlit as st
 import json  # ✅ needed for json.loads
 
 from core.pdf_utils import extract_text_from_pdf
-from core.pdf_utils import extract_text_from_pdf
 from core.analysis import analyze_jd_vs_resume
 from core.interview import get_next_interview_question
+from pathlib import Path  # NEW
+from core.openai_client import reset_usage_log, get_usage_summary_with_cost
 from core.resume_builder import (
     generate_refined_resume_with_llm_judge,
-    generate_pdf_from_markdown,
-    generate_docx_from_markdown,
+    generate_pdf_from_markdown,      # keep for now (fallback)
+    generate_docx_from_markdown,     # keep for now (fallback)
     generate_tailoring_feedback,
+    generate_pdf_export,             # NEW
+    generate_docx_export,            # NEW
 )
+
 from core.skills_map import load_spacy_model, compute_keyword_freqs, make_wordcloud_html
 
 MAX_QUESTIONS = 8
@@ -192,14 +196,6 @@ if st.session_state.page == "Home":
                 "Hybrid weighting will fall back to defaults."
             )
 
-            st.session_state.analysis_json = json.loads(json_str)
-        except Exception:
-            st.session_state.analysis_json = None
-            st.warning(
-                "Could not parse structured analysis JSON. "
-                "Hybrid weighting will fall back to defaults."
-            )
-
     # display analysis results
     if st.session_state.analysis:
         st.markdown("### 🧩 JD vs Resume Analysis Report")
@@ -266,6 +262,9 @@ if st.session_state.page == "Home":
 
     if gen_btn:
 
+        # 🔹 Reset token/cost log for this run
+        reset_usage_log()
+
         with st.spinner("Generating & refining your resume..."):
             result = generate_refined_resume_with_llm_judge(
                 jd_text=st.session_state.jd_text,
@@ -277,15 +276,29 @@ if st.session_state.page == "Home":
                 max_attempts=3,
             )
 
+        # ✅ store generated resume text + judge metadata
         st.session_state.tailored_resume = result["resume"]
         st.session_state.final_score = result["score"]
         st.session_state.judge_rationale = result["judge_rationale"]
 
+        # ✅ structured resume model for template/PDF export (may be None)
+        st.session_state.resume_model = result.get("resume_model")
+
+        # ✅ tailoring feedback stays as-is
         st.session_state.tailoring_feedback = generate_tailoring_feedback(
             jd_text=st.session_state.jd_text,
             original_resume=st.session_state.resume_text,
             updated_resume=st.session_state.tailored_resume,
         )
+
+        # 🔹 After generation: compute and print cost to terminal only
+        usage_summary = get_usage_summary_with_cost()
+        print("\n========== RESUME GENERATION COST ==========")
+        print(f"Prompt tokens: {usage_summary['total_prompt_tokens']}")
+        print(f"Completion tokens: {usage_summary['total_completion_tokens']}")
+        print(f"Total tokens: {usage_summary['total_tokens']}")
+        print(f"Estimated API cost (USD): ${usage_summary['total_cost_usd']:.6f}")
+        print("============================================\n")
 
     # -------- Display resume + feedback --------
     if st.session_state.tailored_resume:
@@ -305,6 +318,31 @@ if st.session_state.page == "Home":
             st.markdown("### 🔍 What changed and why")
             st.markdown(st.session_state.tailoring_feedback)
 
+        # ✅ LinkedIn suggestion ONLY if missing in structured resume
+        resume_model = st.session_state.get("resume_model")
+        linkedin_missing = (
+            resume_model is None
+            or not getattr(resume_model, "linkedin", None)
+        )
+
+        if linkedin_missing:
+            st.info(
+                "💡 Optional: Add your LinkedIn profile URL — resumes with LinkedIn links "
+                "have a higher chance of getting interview callbacks."
+            )
+            linkedin_manual = st.text_input(
+                "LinkedIn Profile URL (optional)",
+                key="linkedin_url",
+                placeholder="https://www.linkedin.com/in/your-profile"
+            )
+
+            # Inject into structured model if available
+            if resume_model is not None and linkedin_manual:
+                if not resume_model.linkedin:
+                    resume_model.linkedin = linkedin_manual
+        else:
+            linkedin_manual = st.session_state.get("linkedin_url")
+
         # downloads
         colA, colB, colC = st.columns(3)
 
@@ -315,16 +353,30 @@ if st.session_state.page == "Home":
                 file_name="jd_fit_resume.md",
                 mime="text/markdown",
             )
-        with colB:
-            pdf_data = generate_pdf_from_markdown(st.session_state.tailored_resume)
-            st.download_button(
-                "⬇️ PDF (Lato)",
-                data=pdf_data,
-                file_name="jd_fit_resume.pdf",
-                mime="application/pdf",
-            )
+
+        # 🔹 Template-aware PDF export with fallback
+        # with colB:
+        #     template_path = Path("templates/resume_template_base.docx")
+        #     pdf_data = generate_pdf_export(
+        #         resume_model=st.session_state.get("resume_model"),
+        #         md_text=st.session_state.tailored_resume,
+        #         template_path=str(template_path),
+        #     )
+        #     st.download_button(
+        #         "⬇️ PDF (Template)",
+        #         data=pdf_data,
+        #         file_name="jd_fit_resume.pdf",
+        #         mime="application/pdf",
+        #     )
+
+        # 🔹 Template-aware DOCX export with fallback
         with colC:
-            docx_data = generate_docx_from_markdown(st.session_state.tailored_resume)
+            template_path = Path("templates/resume_template_base.docx")
+            docx_data = generate_docx_export(
+                resume_model=st.session_state.get("resume_model"),
+                md_text=st.session_state.tailored_resume,
+                template_path=str(template_path),
+            )
             st.download_button(
                 "⬇️ Word (.docx)",
                 data=docx_data,
