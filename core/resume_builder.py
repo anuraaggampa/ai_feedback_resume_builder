@@ -1,8 +1,23 @@
-import json
+"""
+resume_builder.py — NEXT-GEN HYBRID WEIGHTING VERSION
+-----------------------------------------------------
+This file combines:
+✔ Your original ATS-safe structure  
+✔ New JSON-analysis + skill-cluster engine  
+✔ Hybrid weighting (LLM recommended + User override)  
+✔ ≥90% JD skill coverage  
+✔ Interview QA enrichment  
+✔ Lato-based clean PDF export  
+✔ Strict markdown output  
+"""
+from .resume_extractor import extract_resume_to_json
 import io
+import json
 import re
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -14,277 +29,412 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+
 from docx import Document
+from core.openai_client import chat_completion
 
-from .openai_client import chat_completion
+import io  # you likely already have this for PDF; okay if duplicate
+import tempfile
+from typing import Optional
+
+from .resume_model import ResumeModel  # NEW
+
+# Optional dependencies for template-based exports
+try:
+    from docxtpl import DocxTemplate
+    DOCTPL_AVAILABLE = True
+except ImportError:
+    DOCTPL_AVAILABLE = False
+
+try:
+    from docx2pdf import convert as docx2pdf_convert
+    DOCX2PDF_AVAILABLE = True
+except ImportError:
+    DOCX2PDF_AVAILABLE = False
+
+# ============================================================
+# LATO FONT REGISTRATION (fallback → Helvetica)
+# ============================================================
+
+try:
+    pdfmetrics.registerFont(TTFont("Lato", "/usr/share/fonts/truetype/lato/Lato-Regular.ttf"))
+    pdfmetrics.registerFont(TTFont("Lato-Bold", "/usr/share/fonts/truetype/lato/Lato-Bold.ttf"))
+    DEFAULT_FONT = "Lato"
+except Exception:
+    DEFAULT_FONT = "Helvetica"
 
 
-# ==============================
-# JD-FIT RESUME GENERATION PROMPT
-# ==============================
+# ============================================================
+# HARD + SOFT SKILL ANCHORS (GROUNDING FOR LLM)
+# ============================================================
 
+HARD_SKILL_EXAMPLES = [
+    "Python", "SQL", "Power BI", "Data analysis", "EDA", "Statistical analysis",
+    "Hypothesis testing", "A/B testing", "Data pipelines", "ETL", "ELT",
+    "Data cleaning", "Automation workflows", "Advanced Excel", "Power Query",
+    "Dashboarding", "KPI design", "Forecasting", "Regression",
+    "Machine learning fundamentals", "Database systems", "Reporting",
+    "Product analytics"
+]
+
+SOFT_SKILL_EXAMPLES = [
+    "Communication", "Presentation skills", "Decision-making",
+    "Stakeholder management", "Consulting mindset", "Leadership",
+    "Collaboration", "Problem solving", "Critical thinking",
+    "Time management", "Task prioritization", "Attention to detail"
+]
+
+# ============================================================
+# SECTION TITLES (for markdown + PDF rendering)
+# ============================================================
+
+SECTION_HEADINGS = {
+    "Summary",
+    "Professional Summary",
+    "Experience",
+    "Education",
+    "Key Achievements",
+    "Skills",
+    "Projects",
+}
+
+
+def enforce_bold_section_titles(md_text: str) -> str:
+    """
+    Ensure that section titles like 'Summary', 'Experience', etc.
+    are always bold in the markdown output.
+    """
+    lines = md_text.splitlines()
+    out_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip the main name heading and contact line
+        if stripped.startswith("# "):
+            out_lines.append(line)
+            continue
+
+        # If the line is exactly a known section title, convert to bold
+        if stripped in SECTION_HEADINGS:
+            out_lines.append(f"**{stripped}**")
+        else:
+            out_lines.append(line)
+
+    return "\n".join(out_lines)
+
+
+# ============================================================
+# SKILLS SECTION NORMALIZATION
+# ============================================================
+
+def _split_skill_items(text: str) -> List[str]:
+    """
+    Split a skills line like:
+      'Advanced Excel + SQL + Python | Power BI + Dashboarding'
+    into ['Advanced Excel', 'SQL', 'Python', 'Power BI', 'Dashboarding', ...]
+    """
+    tmp = text.replace("|", ",").replace("+", ",")
+    parts = [p.strip(" ,") for p in tmp.split(",")]
+    return [p for p in parts if p]
+
+
+def _rewrite_skills_block(lines: List[str]) -> List[str]:
+    """
+    Take lines inside the Skills section and normalize patterns like:
+
+      Technical Skills:
+      Advanced Excel + SQL + Python | Power BI + Dashboarding...
+
+      Soft Skills:
+      Communication + Presentation skills + Stakeholder management | ...
+
+    into:
+
+      - Technical: Advanced Excel, SQL, Python, Power BI, Dashboarding, ...
+      - Soft: Communication, Presentation skills, Stakeholder management, ...
+    """
+    tech_items: List[str] = []
+    soft_items: List[str] = []
+    other_lines: List[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        # Remove optional bullet prefix
+        l = stripped.lstrip("-").strip()
+
+        low = l.lower()
+        if low.startswith("technical skills:"):
+            content = l.split(":", 1)[1].strip()
+            tech_items.extend(_split_skill_items(content))
+        elif low.startswith("soft skills:"):
+            content = l.split(":", 1)[1].strip()
+            soft_items.extend(_split_skill_items(content))
+        else:
+            other_lines.append(line)
+
+    result: List[str] = []
+
+    # Deduplicate while preserving order
+    def dedupe(seq: List[str]) -> List[str]:
+        seen = set()
+        out = []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    if tech_items:
+        tech_line = "- Technical: " + ", ".join(dedupe(tech_items))
+        result.append(tech_line)
+    if soft_items:
+        soft_line = "- Soft: " + ", ".join(dedupe(soft_items))
+        result.append(soft_line)
+
+    # Include any other lines that we did not parse (for safety)
+    result.extend(other_lines)
+    return result
+
+
+def normalize_skills_section(md_text: str) -> str:
+    """
+    Post-process the markdown to:
+    - Keep only one main section heading: 'Skills'
+    - Convert inner 'Technical Skills:' / 'Soft Skills:' lines with + and |
+      into clean comma-separated lists under bullets:
+
+        - Technical: ...
+        - Soft: ...
+
+    This keeps the section ATS-friendly and avoids multiple 'titles'.
+    """
+    lines = md_text.splitlines()
+    out: List[str] = []
+    in_skills = False
+    buffer_lines: List[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        base = stripped.strip("*")  # handle **Skills**
+
+        if not in_skills:
+            # Detect start of Skills section
+            if base == "Skills":
+                in_skills = True
+                buffer_lines = []
+                out.append(line)  # keep the Skills heading as-is (bold or plain)
+            else:
+                out.append(line)
+        else:
+            # Inside Skills: detect if this line is actually the start of the next section
+            next_base = stripped.strip("*")
+            if next_base in SECTION_HEADINGS and next_base != "Skills":
+                # We hit a new section → flush the normalized skills block first
+                processed = _rewrite_skills_block(buffer_lines)
+                out.extend(processed)
+                buffer_lines = []
+                in_skills = False
+                out.append(line)
+            else:
+                buffer_lines.append(line)
+
+    # If file ended while still inside Skills section → flush buffered block
+    if in_skills:
+        processed = _rewrite_skills_block(buffer_lines)
+        out.extend(processed)
+
+    return "\n".join(out)
+
+
+# ============================================================
+# NEXT-GEN PROMPT BUILDER (HYBRID WEIGHTING + SKILL COVERAGE)
+# ============================================================
 
 def build_jd_fit_resume_prompt(
     jd_text: str,
     resume_text: str,
     analysis_text: str,
     interview_qa: List[Dict[str, str]],
+    user_weighting: Dict[str, int],
     previous_resume: str = "",
     judge_feedback: str = "",
 ) -> str:
     """
-    Build the prompt for the JD-fit resume writer.
-
-    IMPORTANT:
-    The output MUST follow the SAME STRUCTURE as your Enhancv-style resume:
-      1) Name
-      2) Title
-      3) Contact line
-      4) Summary
-      5) Experience
-      6) Education
-      7) Key Achievements
-      8) Skills
-      9) Projects
-
-    We are changing ONLY the content, not the section order or top-level layout.
+    Builds the FULL LLM prompt for JD-fit resume generation.
+    Hybrid weighting uses:
+      - LLM-inferred role type (from analysis)
+      - User override slider (Home → weighting section)
     """
-    previous_block = ""
-    if previous_resume:
-        previous_block = f"""
-PREVIOUS_ATTEMPT_RESUME (Markdown):
-{previous_resume}
 
-"""
-
-    feedback_block = ""
-    if judge_feedback:
-        feedback_block = f"""
-JUDGE_FEEDBACK:
-{judge_feedback}
-
-When you rewrite, address the above feedback explicitly.
-"""
+    previous_block = f"\nPREVIOUS_ATTEMPT_RESUME:\n{previous_resume}\n" if previous_resume else ""
+    feedback_block = f"\nJUDGE_FEEDBACK:\n{judge_feedback}\n" if judge_feedback else ""
 
     return f"""
-You are an ATS-optimized resume writer with an Enhancv-style approach.
+You are an ATS-optimized resume writer with strict structure rules.
+important instructions:If the resume does not explicitly state years of experience
+===============================================================
+### HARD + SOFT SKILL GROUNDING (DO NOT IGNORE)
+Use these lists as the base dictionary:
 
-Your goal:
-Create a JD-FIT RESUME that positions the candidate as a strong, authentic
-match for the JOB DESCRIPTION, without inventing any fake experience.
+HARD_SKILL_EXAMPLES:
+{HARD_SKILL_EXAMPLES}
 
-You are given:
-1. The JOB DESCRIPTION (JD).
-2. The original RESUME (with its own sections: name, title, summary, experience,
-   education, key achievements, skills, projects).
-3. An ANALYSIS comparing JD vs RESUME.
-4. A list of INTERVIEW_QA pairs (questions and the candidate's answers).
-{previous_block}
-{feedback_block}
+SOFT_SKILL_EXAMPLES:
+{SOFT_SKILL_EXAMPLES}
 
-VERY IMPORTANT – HOW TO USE THIS INPUT:
+Your job:
+- Identify JD hard skills  
+- Identify JD soft skills  
+- Ensure ≥ 90% coverage in the FINAL RESUME  
 
-1. Identity & Header
-   - Infer the candidate's name from the original resume.
-     * If you are not sure, use "Your Name".
-   - For the TITLE line:
-     * Prefer using the EXACT job title from the JD (e.g., "Equity Research Data Analyst")
-       if it honestly fits the candidate's domain and level.
-     * If the JD title is clearly mismatched or too senior, choose a close, truthful
-       variant that still uses the main JD keywords (e.g., "Senior Data Scientist" → 
-       "Data Scientist – Financial / Market Analytics").
-   - Infer contact details (phone, email, location) only if clearly present.
-     * If you are not sure, omit missing fields instead of hallucinating.
+===============================================================
+### HYBRID WEIGHTING (CRITICAL)
 
-2. Sections of the Original Resume
-   Infer these sections:
-   - Summary
-   - Experience (one or more roles)
-   - Education
-   - Key Achievements
-   - Skills
-   - Projects (if any)
+You MUST combine two signals:
 
-3. How to Rewrite Each Section
-   - Keep factual content the same:
-     * Same companies, titles, dates, tools actually used.
-     * Same real achievements and responsibilities.
-   - Rewrite wording to:
-     * Better match the JD's language and seniority.
-     * Emphasize impact, measurable results, and ownership.
-     * Use strong, varied action verbs (designed, implemented, led,
-       optimized, automated, improved, analyzed, engineered, etc.).
-     * Avoid generic verbs like "worked on", "helped with", "responsible for"
-       unless unavoidable.
+1) **LLM ROLE-TYPE from analysis**
+   - If JD is technical → prioritize hard skills (approx 70/30)
+   - If JD is non-technical → prioritize soft skills (approx 75/25)
 
-4. Use INTERVIEW_QA to Enrich
-   - Add missing metrics (≈numbers) where the candidate described impact.
-   - Add responsibilities and achievements that were said verbally but not clearly
-     written in the original resume.
-   - Clarify tools, methods, and leadership elements that are relevant for the JD.
-   - Surface achievements the candidate is proud of but not fully documented.
+2) **USER OVERRIDE CONTROL**
+   User selected:
+   - HARD = {user_weighting.get('hard', 70)}%
+   - SOFT = {user_weighting.get('soft', 30)}%
 
-5. Authenticity
-   - Do NOT invent:
-     * New companies,
-     * New roles,
-     * Tools they never mentioned,
-     * Fake metrics or outcomes that are not supported.
-   - You may:
-     * Rephrase,
-     * Reorganize,
-     * Add approximate metrics with "≈" when the direction and order-of-magnitude
-       are implied but not exact.
+Your FINAL weighting MUST blend:
+- 50% LLM-inferred role type
+- 50% User override
 
-6. ATS Standards
-   - Single-column text structure.
-   - No tables, emojis, icons, or 2-column layouts.
-   - Use headings and bullet points.
-   - Use JD keywords only where they match real experience.
-   - The TITLE line should be JD-aligned as described above to help ATS filters,
-     but must remain truthful to the candidate's background.
+Example final weighting calculation:
+final_hard = average(LLM_hard_percent, user_hard_percent)
+final_soft = 100 - final_hard
 
-STRUCTURE REQUIREMENT (CRITICAL):
+You MUST apply final_hard / final_soft in:
+- Summary ordering  
+- Top bullets in Experience  
+- Skills ordering  
+- Projects emphasis  
+- Achievement clustering  
 
-Your output MUST follow EXACTLY this section order and heading structure in markdown:
+===============================================================
+### USE CLUSTERS (NOT INDIVIDUAL SKILLS)
 
-1) First line: the candidate's NAME as a markdown heading, e.g.:
+Correct examples:
+- SQL + Python + Power BI  
+- ETL + pipelines + automation  
+- Communication + stakeholder mgmt + decision-making  
+- Leadership + collaboration + presentation  
 
-# YOUR NAME
+Wrong:
+- Just “SQL”  
+- Just “Communication”
 
-2) Second line: the candidate's TITLE, e.g.:
+Always use skill clusters.
 
-Data Science Analyst
+===============================================================
+### USE INTERVIEW_QA TO PATCH MISSING INFO
 
-   - This TITLE should normally reuse the JD's job title (or a very close variant)
-     when it honestly fits the candidate.
+Rules:
+- If candidate revealed a missing tool → add to resume  
+- If candidate gave metrics → convert to measurable bullets  
+- If a story clarifies ownership/impact → rewrite as an achievement  
+- DO NOT fabricate anything.
 
-3) Third line: contact line with phone, email, and location on one line.
-   Example:
+INTERVIEW DATA:
+{json.dumps(interview_qa, indent=2)}
 
-📞 +91-XXXXXXXXXX  |  ✉️ your.email@example.com  |  Hyderabad, India
+===============================================================
+### OUTPUT STRUCTURE (STRICT)
 
-(Emoji are optional; keep this as simple text if needed, but keep the idea of a
-single contact line.)
+The final resume MUST follow EXACTLY:
 
-Then the following sections in this exact order with these headings:
+# NAME
+TITLE
+Contact Line
 
 Summary
-<one or two short paragraphs; do not use bullets here>
-
 Experience
-For each role:
-- Company Name | Location
-- Job Title | Dates
-- 3–6 bullet points.
-  - Put the MOST JD-RELEVANT, high-impact bullets FIRST (top 2–3 bullets).
-  - Group more routine or less relevant tasks lower in the list.
-  - Where possible, include ≈metrics (%, count, time saved, revenue impact, quality
-    improvement, etc.).
-  - Highlight tools, platforms, and methods that overlap with the JD
-    (e.g., Excel, Python, SQL, Power BI, Bloomberg, financial modeling).
-
 Education
-- Degree | Institution | Location (if known) | Years (if clearly known)
-
 Key Achievements
-For each major achievement:
-- Short achievement title on one line (e.g., "Reduced manual data prep by ≈60% via PySpark automation")
-- 1–3 bullet points describing the context, actions, and measurable impact.
-
 Skills
-- A single line (or couple of lines) listing skills, separated by commas or slashes:
-  Programming languages, tools, platforms, analytics skills, domain knowledge,
-  and soft skills.
-- Ensure JD-relevant skills are clearly visible and appear FIRST in the list.
-- For Excel-related skills, prefer the concise label "Advanced Excel" as the
-  main skill name; detailed formulas and features (INDEX-MATCH, XLOOKUP, ARRAY
-  formulas, Pivot Tables, Power Query, etc.) can be mentioned inside bullets
-  under Experience or Projects.
-
 Projects
-For each project:
-- Project Name | Dates (if known)
-- 1–3 bullet points describing:
-  - The problem or goal,
-  - What was built or analyzed,
-  - Tools and methods used,
-  - Measurable outcome or impact (≈metrics if needed).
 
-YOU MUST RESPECT THIS STRUCTURE AND SECTION ORDER.
-You are allowed to:
-- Change and rewrite the content inside sections,
-- Improve wording, add metrics, and tailor to the JD,
-- But you must keep:
-  - The same section names,
-  - The same ordering: Summary → Experience → Education → Key Achievements → Skills → Projects.
-
----
-
-JOB_DESCRIPTION (JD):
+Rules:
+- No new sections  
+- No reordering  
+- No tables  
+- No icons except contact line emojis  
+- All bullets must start with strong verbs  
+- Summary must use the weighted skill clusters  
+===============================================================
+JOB_DESCRIPTION:
 {jd_text}
-
----
 
 ORIGINAL_RESUME:
 {resume_text}
 
----
-
 JD_vs_RESUME_ANALYSIS:
 {analysis_text}
 
----
+{previous_block}
+{feedback_block}
 
-INTERVIEW_QA (list of objects with 'question' and 'answer'):
-{json.dumps(interview_qa, indent=2)}
+Your output MUST be pure markdown, with NO commentary.
 """
 
 
+# ============================================================
+# JD-FIT RESUME GENERATION (HYBRID + CLUSTER MODEL)
+# ============================================================
 
 def generate_single_jd_fit_resume(
     jd_text: str,
     resume_text: str,
     analysis_text: str,
     interview_qa: List[Dict[str, str]],
+    user_weighting: Dict[str, int],
     previous_resume: str = "",
     judge_feedback: str = "",
 ) -> str:
-    """
-    One-shot JD-fit resume generation (or refinement if previous_resume/judge_feedback provided).
-    """
+    """Generate a *single pass* JD-fit resume (one-shot)."""
+
     prompt = build_jd_fit_resume_prompt(
         jd_text=jd_text,
         resume_text=resume_text,
         analysis_text=analysis_text,
         interview_qa=interview_qa,
+        user_weighting=user_weighting,
         previous_resume=previous_resume,
         judge_feedback=judge_feedback,
     )
-    return chat_completion(
-        system_msg=(
-            "You are an ATS-optimized resume writer that MUST follow the exact requested "
-            "section structure and order."
-        ),
+
+    raw_md = chat_completion(
+        system_msg="You are an ATS-optimized resume writer. Follow the exact structure.",
         user_msg=prompt,
         temperature=0.25,
     )
 
+    # 1) Enforce bold section titles in markdown so both UI and PDF stay consistent
+    md_with_bold = enforce_bold_section_titles(raw_md)
 
-# ==============================
-# LLM-AS-JUDGE SCORING
-# ==============================
+    # 2) Normalize Skills section formatting (commas, one main heading, clean bullets)
+    md_normalized = normalize_skills_section(md_with_bold)
 
+    return md_normalized
+
+
+# ============================================================
+# STRICT LLM-AS-JUDGE SCORING
+# ============================================================
 
 def _extract_json_from_text(raw: str) -> str:
-    """
-    Helper to pull the first JSON object from a response.
-    """
+    """Extract first JSON object from a judge response."""
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError("No JSON object found in judge response.")
-    return raw[start : end + 1]
+    return raw[start:end+1]
 
 
 def score_resume_fit(
@@ -292,45 +442,36 @@ def score_resume_fit(
     resume_markdown: str,
     analysis_text: str,
 ) -> Tuple[float, str]:
-    """
-    LLM-as-judge: score closeness between JD and updated resume.
-    Returns (score_0_to_1, rationale).
-    """
+    """Strict JD–resume fit judge. Outputs score + rationale."""
+
     prompt = f"""
 You are an extremely strict hiring evaluator.
 
-Your task:
-Evaluate how well the UPDATED_RESUME matches the JOB_DESCRIPTION (JD).
+Evaluate how well the UPDATED_RESUME matches the JOB_DESCRIPTION.
 
 Consider:
-- Skills match (must-have and nice-to-have)
-- Tools / technologies overlap
-- Level and responsibilities
-- Domain / problem-space relevance
-- Signals of impact, ownership, and outcomes that the JD cares about
+- Must-have skills
+- Tools / technologies
+- Seniority & responsibility match
+- Domain relevance
+- Impact, ownership, metrics
 
-Output STRICTLY in this JSON format:
-
+Output ONLY this JSON:
 {{
   "score": 0.0,
-  "rationale": "short explanation"
+  "rationale": "..."
 }}
-
-Scoring guidelines:
-- 0.90–1.00: Excellent match
-- 0.80–0.89: Strong but with some gaps
-- 0.60–0.79: Partial match
-- < 0.60: Weak match
 
 JOB_DESCRIPTION:
 {jd_text}
 
-JD_VS_RESUME_ANALYSIS:
+JD_vs_RESUME_ANALYSIS:
 {analysis_text}
 
-UPDATED_RESUME (Markdown):
+UPDATED_RESUME:
 {resume_markdown}
 """
+
     raw = chat_completion(
         system_msg="You are a strict JD–resume fit judge.",
         user_msg=prompt,
@@ -338,72 +479,83 @@ UPDATED_RESUME (Markdown):
     )
 
     try:
-        json_str = _extract_json_from_text(raw)
-        data = json.loads(json_str)
-        score = float(data.get("score", 0.0))
-        rationale = str(data.get("rationale", "")).strip()
+        payload = json.loads(_extract_json_from_text(raw))
+        score = float(payload.get("score", 0.0))
+        rationale = str(payload.get("rationale", "")).strip()
     except Exception:
-        score = 0.0
-        rationale = "Could not parse judge response."
+        return 0.0, "Judge response parse error."
 
     score = max(0.0, min(1.0, score))
     return score, rationale
 
-def generate_tailoring_feedback(
-    jd_text: str,
-    original_resume: str,
-    updated_resume: str,
-) -> str:
+
+# ============================================================
+# MULTI-PASS REFINEMENT WITH LLM JUDGE
+# ============================================================
+def refine_resume_with_rechecker(resume_markdown: str) -> str:
+    """Second-pass LLM polish:
+    - Detect & rewrite AI-sounding, generic corporate phrases dynamically
+    - Split overly long / complex bullets into clearer, shorter ones
+    - Preserve structure, metrics, technologies, and ATS-friendly markdown
     """
-    Use the LLM to explain to the user WHY their resume was tailored this way
-    (title alignment, skills re-ranking, and experience refocus).
-    """
-    prompt = f"""
-You are a friendly resume coach similar to Enhancv.
 
-Explain to the candidate, in three short sections, why their resume was tailored
-for the given job description.
+    if not resume_markdown or not resume_markdown.strip():
+        return resume_markdown
 
-Use the JOB DESCRIPTION, ORIGINAL_RESUME, and UPDATED_RESUME to be as specific
-as possible, but keep the tone simple and encouraging.
-
-Output STRICTLY in markdown with these exact headings:
-
-### Why we aligned your Title
-<1–3 conversational sentences>
-
-### Why we re-ranked your Skills
-<1–3 conversational sentences>
-
-### Why we refocused your Experience
-<1–3 conversational sentences>
-
-Focus on:
-- ATS filters on job titles and keywords,
-- pulling JD-relevant skills to the top of the Skills section,
-- reordering experience bullets so the most relevant, high-impact points appear first.
-
-JOB DESCRIPTION:
-{jd_text}
-
----
-
-ORIGINAL_RESUME (before tailoring):
-{original_resume}
-
----
-
-UPDATED_RESUME (after tailoring):
-{updated_resume}
-"""
-    return chat_completion(
-        system_msg=(
-            "You are a concise, friendly resume coach who explains tailoring "
-            "decisions in plain language."
-        ),
-        user_msg=prompt,
-        temperature=0.3,
+    system_msg = (
+        "You are a resume polishing assistant. "
+        "You make resumes sound human, specific, and concise while staying ATS-friendly."
     )
+
+    user_msg = f"""
+important instructions:If the resume does not explicitly state years of experience,
+omit it entirely.
+You will receive a completed professional resume in Markdown format.
+
+Your goals:
+
+1) Dynamically detect and rewrite AI-sounding, generic, corporate, or over-used phrases.
+   - Examples of the *style* (do NOT hard-code a fixed list): "proven ability",
+     "results-driven professional", "highly skilled", "adept at leveraging",
+     "strong track record", "passionate about".
+   - Replace them with concrete, specific, outcome-based statements that keep the same meaning,
+     grounded in what is already written.
+
+2) Simplify and split overly long or complex bullets or sentences:
+   - Aim for at most ~22–25 words per bullet.
+   - Prefer at most one comma per bullet.
+   - If a bullet is too long or has multiple clauses, split it into 2 bullets, each clear and focused.
+   - Do NOT remove metrics, impact, or technologies; just rewrite for clarity.
+
+3) Preserve:
+   - All factual content, companies, roles, dates, technologies, and metrics.
+   - The overall resume structure: headings, sections, and bullet lists.
+   - ATS friendliness: keep Markdown headings (#, ##) and list markers (- or •). No tables, no fancy formatting.
+
+4) Do NOT invent new experiences, roles, or achievements. Only polish wording and structure.
+
+Return ONLY the improved resume in Markdown. Do NOT add explanations, comments, or JSON.
+
+RESUME (MARKDOWN):
+
+```markdown
+{resume_markdown}
+"""
+    try:
+        improved = chat_completion(
+            system_msg=system_msg,
+            user_msg=user_msg,
+            temperature=0.2,
+        )
+        improved = (improved or "").strip()
+        return improved or resume_markdown
+    except Exception:
+        return resume_markdown
+
+
+
+
+
 
 
 
@@ -412,212 +564,282 @@ def generate_refined_resume_with_llm_judge(
     resume_text: str,
     analysis_text: str,
     interview_qa: List[Dict[str, str]],
-    target_score: float = 0.85,
+    user_weighting: Dict[str, int],
+    target_score: float = 0.92,
     max_attempts: int = 3,
 ) -> Dict[str, str]:
     """
-    Loop:
-    1) Generate JD-fit resume.
-    2) LLM judge scores closeness to JD.
-    3) If score < target_score and attempts < max_attempts:
-         use judge feedback to regenerate.
-
-    Returns dict with:
-      - "resume": final markdown
-      - "score": final score (0–1)
-      - "attempts": number of attempts used
-      - "judge_rationale": last rationale
+    Repeated improvement loop:
+      1. Generate JD-fit resume
+      2. Judge scores it
+      3. If score < threshold → refine using judge rationale
     """
-    current_resume = ""
-    last_rationale = ""
+
+    current = ""
+    rationale = ""
     final_score = 0.0
-    attempt = 0
 
     for attempt in range(1, max_attempts + 1):
-        current_resume = generate_single_jd_fit_resume(
+
+        # 1) Generate a single JD-fit resume candidate
+        current = generate_single_jd_fit_resume(
             jd_text=jd_text,
             resume_text=resume_text,
             analysis_text=analysis_text,
             interview_qa=interview_qa,
-            previous_resume=current_resume,
-            judge_feedback=last_rationale,
+            user_weighting=user_weighting,
+            previous_resume=current,
+            judge_feedback=rationale,
         )
 
+        # 2) Score it with the strict judge
         score, rationale = score_resume_fit(
             jd_text=jd_text,
-            resume_markdown=current_resume,
+            resume_markdown=current,
             analysis_text=analysis_text,
         )
         final_score = score
-        last_rationale = rationale
 
+        # 3) Early stop if we hit the target quality
         if score >= target_score:
             break
+    # ✅ After the judge loop completes — polish the resume
+    polished_resume = refine_resume_with_rechecker(current)
+    current = polished_resume
+
+    # ✅ Extract structured model from polished resume (for template export)
+    try:
+        resume_model = extract_resume_to_json(current)
+    except Exception:
+        resume_model = None
 
     return {
-        "resume": current_resume,
+        "resume": current,            # ✅ UI now receives refined version
         "score": final_score,
         "attempts": attempt,
-        "judge_rationale": last_rationale,
+        "judge_rationale": rationale,
+        "resume_model": resume_model, # ✅ matches polished resume
     }
 
 
-# ==============================
-# MARKDOWN → PDF / DOCX EXPORT
-# ==============================
 
+
+# ============================================================
+# EXPLANATION BLOCK (WHY WE MADE THESE CHANGES)
+# ============================================================
+
+def generate_tailoring_feedback(
+    jd_text: str,
+    original_resume: str,
+    updated_resume: str,
+) -> str:
+    """Explain WHY the resume changed (ATS title, skills ordering, experience refocus)."""
+
+    prompt = f"""
+You are a friendly resume coach like Enhancv.
+
+Explain in **three short blocks** why the resume was rewritten.
+
+Output in EXACT markdown:
+
+### Why we aligned your Title
+(2–3 sentences)
+
+### Why we re-ranked your Skills
+(2–3 sentences)
+
+### Why we refocused your Experience
+(2–3 sentences)
+
+Be specific but encouraging.
+
+JOB_DESCRIPTION:
+{jd_text}
+
+ORIGINAL_RESUME:
+{original_resume}
+
+UPDATED_RESUME:
+{updated_resume}
+"""
+
+    return chat_completion(
+        system_msg="You are a concise resume coach.",
+        user_msg=prompt,
+        temperature=0.3,
+    )
+
+
+# ============================================================
+# MARKDOWN → SIMPLE HTML (very tiny converter)
+# ============================================================
 
 def _md_to_simple_html(text: str) -> str:
-    """
-    Very small markdown → HTML converter for bold (**text**).
-    This is enough for things like **Location:** etc.
-    """
+    """Convert simple markdown (**bold**) to HTML."""
     def repl(m):
         return f"<b>{m.group(1)}</b>"
-
     return re.sub(r"\*\*(.+?)\*\*", repl, text)
 
 
+# ============================================================
+# PDF GENERATION (LATO / CLEAN ATS STYLE)
+# ============================================================
+
 def generate_pdf_from_markdown(md_text: str) -> bytes:
     """
-    Convert markdown resume text into a more structured, resume-looking PDF:
+    Convert markdown resume into a clean ATS-friendly PDF using Lato.
 
-    - Big centered name at top (# line)
-    - Clean section headings (Summary, Experience, Education, etc.)
-    - Real bullet lists instead of raw "- " lines
-    - Basic bold for things like **Location:**
+    Features:
+    - Big bold name
+    - Single-column structure
+    - Clean spacing
+    - Bullets rendered correctly
+    - Sections clearly separated
     """
+
     buffer = io.BytesIO()
 
-    # Base document
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         leftMargin=20 * mm,
         rightMargin=20 * mm,
-        topMargin=20 * mm,
-        bottomMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
     )
 
     styles = getSampleStyleSheet()
+
+    font_name = DEFAULT_FONT
+
     name_style = ParagraphStyle(
         "NameStyle",
         parent=styles["Title"],
-        fontSize=18,
-        leading=22,
+        fontName=f"{font_name}-Bold" if font_name != "Helvetica" else font_name,
+        fontSize=20,
+        leading=24,
         alignment=TA_CENTER,
-        spaceAfter=8,
+        spaceAfter=10,
     )
+
     contact_style = ParagraphStyle(
         "ContactStyle",
         parent=styles["Normal"],
+        fontName=font_name,
         alignment=TA_CENTER,
         fontSize=10,
         leading=12,
-        spaceAfter=10,
+        spaceAfter=12,
     )
+
     section_style = ParagraphStyle(
         "SectionStyle",
         parent=styles["Heading2"],
+        fontName=f"{font_name}-Bold" if font_name != "Helvetica" else font_name,
         fontSize=12,
         leading=14,
-        spaceBefore=8,
+        spaceBefore=10,
         spaceAfter=4,
         alignment=TA_LEFT,
     )
+
     normal_style = ParagraphStyle(
         "NormalStyle",
         parent=styles["Normal"],
+        fontName=font_name,
         fontSize=10,
         leading=13,
-        spaceAfter=2,
+        spaceAfter=3,
     )
+
     bullet_style = ParagraphStyle(
         "BulletStyle",
         parent=styles["Normal"],
+        fontName=font_name,
         fontSize=10,
         leading=13,
         leftIndent=12,
-        spaceAfter=1,
+        spaceAfter=2,
     )
 
-    # Known section headings in your template
-    SECTION_HEADINGS = {
-        "Summary",
-        "Professional Summary",
-        "Experience",
-        "Education",
-        "Key Achievements",
-        "Skills",
-        "Projects",
-    }
+    def normalize_heading(line: str) -> str:
+        """
+        Strip markdown markers (###, **, etc.) so we can
+        correctly detect section titles.
+        """
+        clean = line.strip()
+
+        # Remove leading markdown hashes (##, ###, etc.)
+        while clean.startswith("#"):
+            clean = clean[1:].lstrip()
+
+        # Remove outer bold/italic markers like **Summary** or *Summary*
+        clean = clean.strip("*").strip("_").strip()
+
+        return clean
 
     lines = md_text.splitlines()
     story = []
 
     name_set = False
     contact_set = False
+
     i = 0
-
     while i < len(lines):
-        raw_line = lines[i]
-        line = raw_line.strip()
+        raw = lines[i]
+        line = raw.strip()
 
-        # Blank line → small spacing
+        # Skip blank lines
         if not line:
             story.append(Spacer(1, 4))
             i += 1
             continue
 
-        # Name line: first markdown heading "# ..."
+        # Name line (# ...)
         if line.startswith("# ") and not name_set:
-            name_text = line[2:].strip()
-            story.append(Paragraph(_md_to_simple_html(name_text), name_style))
+            story.append(Paragraph(_md_to_simple_html(line[2:].strip()), name_style))
             name_set = True
             i += 1
             continue
 
-        # Contact line: assume the line following the title or a line that looks like contact info
+        # Contact line
         if name_set and not contact_set and (
-            line.startswith("📞")
-            or "@" in line
-            or "Location:" in line
-            or "Hyderabad" in line  # loosely matches your style
+            "@" in line or "📞" in line or "|" in line
         ):
             story.append(Paragraph(_md_to_simple_html(line), contact_style))
             contact_set = True
             i += 1
             continue
 
-        # Section headings
-        if line in SECTION_HEADINGS:
-            story.append(Spacer(1, 6))
-            story.append(Paragraph(line, section_style))
-            story.append(Spacer(1, 2))
+        # SECTION headings (robust to markdown formatting)
+        normalized = normalize_heading(line)
+        if normalized in SECTION_HEADINGS:
+            story.append(Paragraph(_md_to_simple_html(normalized), section_style))
             i += 1
             continue
 
-        # Bullet block: gather consecutive "- " lines into one ListFlowable
+        # Bullets
         if line.startswith("- "):
-            bullet_items = []
+            bullets = []
             while i < len(lines) and lines[i].strip().startswith("- "):
-                bullet_text = lines[i].strip()[2:].strip()
-                bullet_html = _md_to_simple_html(bullet_text)
-                bullet_items.append(ListItem(Paragraph(bullet_html, bullet_style)))
+                text = lines[i].strip()[2:].strip()
+                bullets.append(
+                    ListItem(Paragraph(_md_to_simple_html(text), bullet_style))
+                )
                 i += 1
-            if bullet_items:
-                story.append(ListFlowable(bullet_items, bulletType="bullet", start="•"))
+            if bullets:
+                story.append(
+                    ListFlowable(bullets, bulletType="bullet", start="•")
+                )
             continue
 
-        # Lines that look like "Role | Company | Location | Dates"
+        # Lines like: "Role | Company | Location | Date"
         if "|" in line:
-            story.append(Spacer(1, 2))
             story.append(Paragraph(_md_to_simple_html(line), normal_style))
-            story.append(Spacer(1, 1))
             i += 1
             continue
 
-        # Default: paragraph
+        # Normal paragraph
         story.append(Paragraph(_md_to_simple_html(line), normal_style))
         i += 1
 
@@ -626,14 +848,162 @@ def generate_pdf_from_markdown(md_text: str) -> bytes:
     return buffer.read()
 
 
+# ============================================================
+# DOCX EXPORT
+# ============================================================
+
 def generate_docx_from_markdown(md_text: str) -> bytes:
-    """
-    Convert markdown text into a basic Word document.
-    """
+    """Convert markdown resume into basic .docx."""
     doc = Document()
     for line in md_text.split("\n"):
         doc.add_paragraph(line)
+
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer.read()
+
+def generate_docx_from_model(resume: ResumeModel, template_path: str) -> bytes:
+    """
+    Render a DOCX resume using a Word template + ResumeModel.
+
+    This expects a template like the one we created with placeholders:
+      {{ NAME }}, {{ TITLE }}, {{ EMAIL }}, {{ PHONE }},
+      {{ LOCATION }}, {{ LINKEDIN }},
+      {{ SUMMARY }}, {{ SKILLS_INLINE }},
+      {% for job in EXPERIENCE %}...{% endfor %}, etc.
+    """
+    if not DOCTPL_AVAILABLE:
+        raise RuntimeError(
+            "docxtpl is not installed. Install it with `pip install docxtpl` "
+            "or use the markdown-based DOCX export."
+        )
+
+    doc = DocxTemplate(template_path)
+
+    context = {
+        "NAME": resume.name,
+        "TITLE": resume.title,
+        "EMAIL": resume.email,
+        "PHONE": resume.phone,
+        "LOCATION": resume.location,
+        "LINKEDIN": resume.linkedin,
+        "SUMMARY": resume.summary,
+        "SKILLS_INLINE": resume.skills_inline,
+        "EXPERIENCE": [
+            {
+                "role": item.role,
+                "company": item.company,
+                "location": item.location,
+                "start": item.start,
+                "end": item.end,
+                "bullets": item.bullets,
+            }
+            for item in (resume.experience or [])
+        ],
+        "EDUCATION": [
+            {
+                "degree": edu.degree,
+                "institution": edu.institution,
+                "location": edu.location,
+                "year": edu.year,
+            }
+            for edu in (resume.education or [])
+        ],
+        "ACHIEVEMENTS": list(resume.achievements or []),
+        "PROJECTS": [
+            {
+                "name": proj.name,
+                "bullets": proj.bullets,
+            }
+            for proj in (resume.projects or [])
+        ],
+    }
+
+    doc.render(context)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
+def generate_pdf_from_docx_bytes(docx_bytes: bytes) -> bytes:
+    """
+    Convert DOCX bytes → PDF bytes using docx2pdf.
+    Uses temporary files internally but returns a clean in-memory bytes object.
+    """
+    if not DOCX2PDF_AVAILABLE:
+        raise RuntimeError(
+            "docx2pdf is not installed. Install it with `pip install docx2pdf` "
+            "or use the markdown-based PDF export."
+        )
+
+    # Write DOCX to a temp file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_in:
+        tmp_in.write(docx_bytes)
+        tmp_in_path = tmp_in.name
+
+    # Prepare temp output path for PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
+        tmp_out_path = tmp_out.name
+
+    # Run conversion
+    docx2pdf_convert(tmp_in_path, tmp_out_path)
+
+    # Read PDF back into memory
+    with open(tmp_out_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    return pdf_bytes
+
+def generate_docx_export(
+    resume_model: Optional[ResumeModel],
+    md_text: str,
+    template_path: Optional[str] = None,
+) -> bytes:
+    """
+    Preferred DOCX export:
+    - If a structured ResumeModel AND a template_path are provided AND docxtpl is available:
+        → use the template-based DOCX export.
+    - Otherwise:
+        → fall back to the simple markdown-based DOCX export.
+    """
+    if resume_model is not None and template_path and DOCTPL_AVAILABLE:
+        try:
+            return generate_docx_from_model(resume_model, template_path)
+        except Exception:
+            # Optional: log or print debug; for now we silently fall back
+            pass
+
+    # Fallback: existing behavior
+    return generate_docx_from_markdown(md_text)
+
+
+def generate_pdf_export(
+    resume_model: Optional[ResumeModel],
+    md_text: str,
+    template_path: Optional[str] = None,
+) -> bytes:
+    """
+    Preferred PDF export:
+    - If ResumeModel + template_path + both docxtpl & docx2pdf are available:
+        → Template-based DOCX → PDF.
+    - Otherwise:
+        → fall back to existing markdown-based PDF (ReportLab).
+    """
+    if (
+        resume_model is not None
+        and template_path
+        and DOCTPL_AVAILABLE
+        and DOCX2PDF_AVAILABLE
+    ):
+        try:
+            docx_bytes = generate_docx_from_model(resume_model, template_path)
+            return generate_pdf_from_docx_bytes(docx_bytes)
+        except Exception:
+            # Optional: log failure; then fall back to markdown PDF
+            pass
+
+    # Fallback: existing behavior
+    return generate_pdf_from_markdown(md_text)
