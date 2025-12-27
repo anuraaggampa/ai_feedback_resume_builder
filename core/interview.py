@@ -58,9 +58,7 @@ def build_next_question_prompt(
         • 1–2 strongest/high-impact projects
         • KPIs / metrics / business impact (woven into project questions)
         • Ownership, decision-making, stakeholder stories
-        • Evidence for core competencies (product lifecycle, RCA, business understanding, etc.)
-    - Now also: JD THEMES / AXES (from the analysis) to decide WHICH areas to deepen.
-    
+
     Phases:
     - Q1–3: Understand current role + responsibilities + strongest project + impact
     - Q4–(max_questions-1): Deep dive on 1–2 key projects (problem → actions → tools → impact)
@@ -81,16 +79,13 @@ Your goal is to capture missing information that improves:
 - Role context (team size, scope, responsibilities, level of ownership)
 - Project stories (problem → actions → tools → outcome)
 - Leadership / ownership / stakeholder signals
-- Evidence for core competencies (e.g. product lifecycle ownership, root cause analysis,
-  business understanding, experimentation mindset, stakeholder management, cross-functional collaboration)
 - Missing achievements that belong in the resume
 - Coverage of the most important JD THEMES / AXES that are currently weak in the resume
 
 You have:
 - The JD text.
 - The candidate's current resume.
-- An analysis of JD vs resume (gaps, coverage, role_type, gap_analysis JSON, dynamic competency analysis,
-  and a **JD Theme Coverage (Axes)** section listing 3–6 key themes with importance and coverage scores).
+- An analysis of JD vs resume (gaps, coverage, role_type, gap_analysis JSON).
 - A history of previous interview Q&A pairs.
 
 You have already asked {num_questions_asked} questions.
@@ -100,61 +95,6 @@ IMPORTANT:
 - You do NOT need to cover every missing skill in the interview.
 - Missing skills (from analysis_text) will be woven into the resume later.
 - Use JD / gaps only to decide which projects or responsibilities to dig deeper into.
-- Give extra priority to clarifying core COMPETENCIES that appear missing or weak in the analysis,
-  especially items under "Missing / Under-emphasized Competencies" or similar sections.
-
---------------------------------
-HOW TO USE JD THEMES (AXES)
---------------------------------
-In the JD vs RESUME analysis, there may be a section like:
-
-"JD Theme Coverage (Axes)"
-- Each axis has:
-  - a name (e.g. "AI/ML enablement", "KPI governance", "Stakeholder management"),
-  - an IMPORTANCE score (0–1),
-  - a COVERAGE score (0–1),
-  - and a weighted score.
-
-You MUST:
-- Scan the JD Theme Coverage (Axes) section.
-- Treat axes with **high importance** and **low coverage** as PRIORITY areas for your questions.
-- When choosing what to ask about next, favour questions that:
-  - Elicit stories, tools, and impact that support these weak-but-important axes.
-  - Help the future resume show stronger evidence for those themes.
-- Axes with already high coverage do NOT need many more questions; you can move on.
-
-Example:
-- If an axis like "AI/ML enablement" or "Metrics & experimentation" is high-importance but low-coverage:
-  - Ask about projects where the candidate worked with data scientists, models, experiments, or KPIs.
-- If an axis like "Stakeholder management" is high-importance but low-coverage:
-  - Ask about how they worked with business partners, PMs, leaders, or cross-functional teams.
-
---------------------------------
-HOW TO THINK ABOUT COMPETENCIES
---------------------------------
-Competencies are higher-level capability themes, not individual tools or generic soft skills.
-They describe how the candidate works in real situations.
-
-Typical competency themes include:
-- Product lifecycle ownership (ideation → requirements → implementation → rollout → metrics)
-- Root cause analysis and problem investigation
-- Business understanding and linking work to KPIs or revenue/risk
-- Experimentation and learning mindset (A/B tests, hypothesis-driven work)
-- Metrics ownership and impact orientation
-- Stakeholder management and expectation-setting
-- Requirement gathering and problem framing
-- Cross-functional collaboration with PM/Eng/Design/Business
-
-When a competency is missing or unclear in the analysis:
-- Ask for a concrete story where that competency SHOULD show up.
-- Guide the candidate to explain:
-    1) The context / problem
-    2) What they personally did (not just the team)
-    3) Tools / methods they used (SQL, analysis, experiments, frameworks, etc.)
-    4) The impact in simple, business language
-    5) Any reflection or learning
-
-Your questions should make it easy for the candidate to tell these stories in simple language.
 
 --------------------------------
 QUESTION PHASES
@@ -168,9 +108,6 @@ PHASE 1 (Questions 1–3): "Current role & strongest project, with impact"
   - Quickly move to their **strongest/high-impact, JD-relevant project**.
   - While asking about that project, ALSO ask what changed or improved
     (metrics, KPIs, time saved, accuracy improved, risk reduced, revenue/profit impact etc.).
-  - If the analysis suggests missing competencies like product lifecycle, root cause analysis,
-    or business understanding, you can gently steer the question to touch those.
-  - Where possible, pick a project that can improve coverage for a high-importance / low-coverage JD axis.
 
   Example styles:
     • "In your current role, what do you mainly work on day to day, and who do you work with most?"
@@ -185,10 +122,6 @@ PHASE 2 (Questions 4–(max_questions-1)): "Deep dive into 1–2 key projects"
       - The candidate's personal role and decisions
       - The tools / methods they used
       - The outcome, with metrics/KPIs where possible
-  - Where relevant, explicitly target:
-      - Missing competencies from the analysis (e.g. product lifecycle, root cause analysis,
-        experimentation mindset, stakeholder management).
-      - High-importance JD axes that currently have low coverage.
   - Keep questions simple and concrete, one or two ideas per question.
 
   Example styles:
@@ -196,7 +129,6 @@ PHASE 2 (Questions 4–(max_questions-1)): "Deep dive into 1–2 key projects"
     • "What specific steps did you take to solve that problem, and which tools did you use most?"
     • "How big was the data or scale you were dealing with in that project?"
     • "In that project, how did you work with stakeholders or other teams?"
-    • "Can you walk me through how you identified the root cause of the problem and what actions you took?"
 
 PHASE 3 (Last question = when you are at or near the max): "Anything else to highlight"
 - For the final question (or when you feel the story is complete), you can ask:
@@ -221,12 +153,10 @@ STYLE & FORMAT RULES
   - You can use a small 2-step pattern in one sentence:
       "What was the project about, and what was your role?"
 
-- Tie questions back to JD requirements, JD THEMES (AXES), and competencies in a light way:
-  - Use the JD vs resume analysis (including competency gaps AND JD Theme Coverage / Axes)
-    to choose WHICH project or aspect to ask about,
+- Tie questions back to JD requirements in a light way:
+  - Use the JD vs resume analysis to choose WHICH project or aspect to ask about,
     but do not try to exhaustively cover every missing skill.
-  - Focus on getting rich stories, numbers, competency evidence, and coverage for high-importance / low-coverage axes,
-    not a skill checklist.
+  - Focus on getting rich stories + numbers, not a skill checklist.
 
 --------------------------------
 CONTEXT
@@ -237,8 +167,7 @@ JOB DESCRIPTION (JD):
 CURRENT RESUME:
 {resume_text}
 
-JD vs RESUME ANALYSIS (may contain missing skills, coverage, role_type, gap_analysis JSON, competency_analysis,
-and a JD Theme Coverage (Axes) section):
+JD vs RESUME ANALYSIS (may contain missing skills, coverage, role_type, gap_analysis JSON):
 {analysis_text}
 
 INTERVIEW_QA SO FAR:
@@ -250,7 +179,6 @@ YOUR OUTPUT
 - Return ONLY the next question text, OR the single token DONE.
 No explanations, no JSON, no extra commentary.
 """
-
 
 
 # ============================================================
