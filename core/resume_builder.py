@@ -1,14 +1,6 @@
 """
 resume_builder.py — NEXT-GEN HYBRID WEIGHTING VERSION
 -----------------------------------------------------
-This file combines:
-✔ Your original ATS-safe structure  
-✔ New JSON-analysis + skill-cluster engine  
-✔ Hybrid weighting (LLM recommended + User override)  
-✔ ≥90% JD skill coverage  
-✔ Interview QA enrichment  
-✔ Lato-based clean PDF export  
-✔ Strict markdown output  
 """
 from .resume_extractor import extract_resume_to_json
 import io
@@ -266,22 +258,6 @@ def build_jd_fit_resume_prompt(
       - LLM-inferred role type (from analysis)
       - User override slider (Home → weighting section)
     """
-
-    previous_block = f"\nPREVIOUS_ATTEMPT_RESUME:\n{previous_resume}\n" if previous_resume else ""
-    feedback_block = f"\nJUDGE_FEEDBACK:\n{judge_feedback}\n" if judge_feedback else ""
-
-    return f"""
-You are an ATS-optimized resume writer with strict structure and honesty rules.
-
-CRITICAL HONESTY RULES (DO NOT BREAK):
-- If the original resume + interview DO NOT clearly state a number (years of experience, % improvement, revenue impact, etc.),
-  you MUST NOT invent specific numbers.
-- You may slightly round or tidy existing numbers (e.g. 11.8% → 12%), but NEVER fabricate impact, years, or projects.
-- You MUST NOT invent companies, roles, projects, tools, or domains that are not clearly implied by the original resume
-  and interview answers.
-- When in doubt, keep the statement qualitative instead of making up a precise metric.
-
-===============================================================
 ### HARD + SOFT SKILL + COMPETENCY GROUNDING (DO NOT IGNORE)
 
 Use these lists as the base skill dictionary:
@@ -323,7 +299,6 @@ Your job:
 - If a skill or competency is completely unsupported by the original resume + interview,
   you MUST NOT pretend the candidate has it.
 
-===============================================================
 ### HYBRID WEIGHTING (CRITICAL)
 
 You MUST combine two signals:
@@ -356,7 +331,6 @@ You MUST apply final_hard / final_soft in:
 - Project emphasis
 - Achievement clustering and phrasing
 
-===============================================================
 ### USE CLUSTERS (NOT INDIVIDUAL SKILLS)
 
 You MUST group skills and competencies into meaningful clusters, not isolated tokens.
@@ -373,7 +347,6 @@ Wrong:
 
 Always use short, meaningful clusters that show how tools + competencies work together.
 
-===============================================================
 ### USE INTERVIEW_QA TO PATCH MISSING INFO (BUT NEVER FABRICATE)
 
 Rules:
@@ -391,7 +364,6 @@ Rules:
 INTERVIEW DATA:
 {json.dumps(interview_qa, indent=2)}
 
-===============================================================
 ### REUSE OF ORIGINAL RESUME CONTENT (VERY IMPORTANT)
 
 You MUST treat ORIGINAL_RESUME as the primary source of truth for the candidate's experience.
@@ -417,7 +389,6 @@ Rules:
 - The goal is to orchestrate the user’s real history around the JD themes and gaps,
   not to replace their history with something new.
 
-===============================================================
 ### HOW TO USE JD_vs_RESUME_ANALYSIS (INCLUDING COMPETENCIES + AXES)
 
 JD_vs_RESUME_ANALYSIS can include:
@@ -442,7 +413,6 @@ You MUST:
 - Use the axes to decide *what this JD actually cares about most* and bias the resume toward those themes,
   **without inventing new roles, tools, or projects**.
 
-===============================================================
 ### WEAVING MISSING SKILLS & COMPETENCIES INTO THE RESUME
 
 You MUST use the missing skill / competency information from JD_vs_RESUME_ANALYSIS to GUIDE HOW you rewrite and emphasize content.
@@ -474,10 +444,91 @@ In short:
   - exposing and rewriting real evidence already present,
   - not by fabricating new capabilities.
 
-===============================================================
 ### OUTPUT STRUCTURE (STRICT)
 
 The final resume MUST follow EXACTLY this structure and order:
+
+# NAME
+TITLE
+Contact Line
+
+
+    previous_block = f"\nPREVIOUS_ATTEMPT_RESUME:\n{previous_resume}\n" if previous_resume else ""
+    feedback_block = f"\nJUDGE_FEEDBACK:\n{judge_feedback}\n" if judge_feedback else ""
+
+    return f"""
+You are an ATS-optimized resume writer with strict structure rules.
+important instructions:If the resume does not explicitly state years of experience
+### HARD + SOFT SKILL GROUNDING (DO NOT IGNORE)
+Use these lists as the base dictionary:
+
+HARD_SKILL_EXAMPLES:
+{HARD_SKILL_EXAMPLES}
+
+SOFT_SKILL_EXAMPLES:
+{SOFT_SKILL_EXAMPLES}
+
+Your job:
+- Identify JD hard skills  
+- Identify JD soft skills  
+- Ensure ≥ 90% coverage in the FINAL RESUME  
+
+### HYBRID WEIGHTING (CRITICAL)
+
+You MUST combine two signals:
+
+1) **LLM ROLE-TYPE from analysis**
+   - If JD is technical → prioritize hard skills (approx 70/30)
+   - If JD is non-technical → prioritize soft skills (approx 75/25)
+
+2) **USER OVERRIDE CONTROL**
+   User selected:
+   - HARD = {user_weighting.get('hard', 70)}%
+   - SOFT = {user_weighting.get('soft', 30)}%
+
+Your FINAL weighting MUST blend:
+- 50% LLM-inferred role type
+- 50% User override
+
+Example final weighting calculation:
+final_hard = average(LLM_hard_percent, user_hard_percent)
+final_soft = 100 - final_hard
+
+You MUST apply final_hard / final_soft in:
+- Summary ordering  
+- Top bullets in Experience  
+- Skills ordering  
+- Projects emphasis  
+- Achievement clustering  
+
+### USE CLUSTERS (NOT INDIVIDUAL SKILLS)
+
+Correct examples:
+- SQL + Python + Power BI  
+- ETL + pipelines + automation  
+- Communication + stakeholder mgmt + decision-making  
+- Leadership + collaboration + presentation  
+
+Wrong:
+- Just “SQL”  
+- Just “Communication”
+
+Always use skill clusters.
+
+### USE INTERVIEW_QA TO PATCH MISSING INFO
+
+Rules:
+- If candidate revealed a missing tool → add to resume  
+- If candidate gave metrics → convert to measurable bullets  
+- If a story clarifies ownership/impact → rewrite as an achievement  
+- DO NOT fabricate anything.
+
+INTERVIEW DATA:
+{json.dumps(interview_qa, indent=2)}
+
+### OUTPUT STRUCTURE (STRICT)
+
+The final resume MUST follow EXACTLY:
 
 # NAME
 TITLE
@@ -494,64 +545,22 @@ Rules:
 - No new sections  
 - No reordering  
 - No tables  
-- No icons except simple contact-line emojis (☎️, ✉️, 🌐) if appropriate  
-- All bullets must start with strong, past-tense or present-tense verbs  
-  (e.g. "Led", "Designed", "Built", "Implemented", "Optimized", "Collaborated", "Owned").
-- Summary must clearly reflect the final hard/soft/competency weighting
-  (for a technical role, lead with hard skills + technical competencies; for a more business/ops role,
-   lead with business understanding + stakeholder/ownership competencies).
-
-Summary guidelines:
-- 3–5 lines.
-- Must mention:
-  - Role level (e.g. "Data Analyst", "Senior Analytics Specialist") WITHOUT inventing total years.
-  - 2–3 most important hard-skill clusters.
-  - 2–3 most important competencies (e.g. experimentation mindset, product lifecycle, stakeholder management).
-  - A hint of impact (e.g. "driving X, improving Y, reducing Z").
-
-Experience guidelines:
-- Reverse chronological.
-- Each role:
-  - 3–7 bullets.
-  - Each bullet must highlight:
-      - Action + tools/approach + impact + (optionally) competency signal.
-  - Example pattern:
-      "Led [what] using [tools/approach], resulting in [impact metric], demonstrating [competency]."
-- Always start from the ORIGINAL bullets for each job and rewrite them.
-- Do not skip roles or hide relevant responsibilities: instead, rewrite them so they support JD themes (axes) where possible.
-- When in doubt between adding something new and reusing something from ORIGINAL_RESUME, prefer reusing and rephrasing ORIGINAL content.
-
-Skills guidelines:
-- Group into clear clusters, NOT a flat comma list.
-- Example:
-  - "Analytics & Experimentation: A/B testing, experiment design, metric definition, RCA"
-  - "Data & Engineering: SQL, Python, PySpark, ETL, data pipelines"
-  - "Business & Collaboration: stakeholder management, requirement gathering, cross-functional collaboration"
-
-Projects (if needed):
-- 1–3 projects with JD-relevant focus.
-- Each project: 2–4 bullets, same action → tools → impact → competency pattern.
-
-Key Achievements:
-- 3–6 bullets summarizing the highest-impact outcomes across roles.
-- Each should read like a strong interview story compressed into one line.
-
-===============================================================
 ### INPUT CONTEXT (DO NOT IGNORE)
 
+- No icons except contact line emojis  
+- All bullets must start with strong verbs  
+- Summary must use the weighted skill clusters  
 JOB_DESCRIPTION:
 {jd_text}
 
 ORIGINAL_RESUME:
 {resume_text}
 
-JD_vs_RESUME_ANALYSIS (includes gaps, role_type, gap_analysis, competency_analysis, JD axes, and axis_scores):
+JD_vs_RESUME_ANALYSIS:
 {analysis_text}
 
 {previous_block}
 {feedback_block}
-
-===============================================================
 ### FINAL OUTPUT FORMAT
 
 Your output MUST be a single, well-formatted Markdown resume with the exact sections:
@@ -571,9 +580,14 @@ Projects
 - No JSON.
 - No explanations.
 - Your output MUST be pure markdown, with NO commentary.
+
+Your output MUST be pure markdown, with NO commentary.
 """
 
 
+# ============================================================
+# JD-FIT RESUME GENERATION (HYBRID + CLUSTER MODEL)
+# ============================================================
 
 
 # ============================================================
@@ -615,6 +629,10 @@ def generate_single_jd_fit_resume(
 
     return md_normalized
 
+
+# ============================================================
+# STRICT LLM-AS-JUDGE SCORING
+# ============================================================
 
 # ============================================================
 # STRICT LLM-AS-JUDGE SCORING
