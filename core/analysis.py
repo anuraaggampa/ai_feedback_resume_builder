@@ -26,14 +26,25 @@ except ImportError:
     SequenceTagger = None
 
 # Ensure required NLTK models are available ONCE at import time.
-for resource, path in [
-    ("punkt", "tokenizers/punkt"),
-    ("averaged_perceptron_tagger", "taggers/averaged_perceptron_tagger"),
-]:
-    try:
-        nltk.data.find(path)
-    except LookupError:
-        nltk.download(resource)
+def assert_nltk_ready() -> None:
+    """Fail fast if NLTK data isn't baked into the environment."""
+    required = [
+        ("punkt", "tokenizers/punkt"),
+        ("averaged_perceptron_tagger", "taggers/averaged_perceptron_tagger"),
+    ]
+    missing = []
+    for name, path in required:
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            missing.append(name)
+
+    if missing:
+        raise RuntimeError(
+            f"Missing NLTK resources: {missing}. "
+            "Do NOT download at runtime. Bake into Docker image or install locally."
+        )
+
 
 
 # Ensure the standard punkt tokenizer is available.

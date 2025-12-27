@@ -14,9 +14,9 @@ from core.resume_builder import (
     generate_pdf_export,             # NEW
     generate_docx_export,            # NEW
 )
-
+from core.analysis import assert_nltk_ready
 from core.skills_map import load_spacy_model, compute_keyword_freqs, make_wordcloud_html
-
+assert_nltk_ready()
 MAX_QUESTIONS = 8
 
 @st.cache_resource
