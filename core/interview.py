@@ -80,6 +80,7 @@ Your goal is to capture missing information that improves:
 - Project stories (problem → actions → tools → outcome)
 - Leadership / ownership / stakeholder signals
 - Missing achievements that belong in the resume
+- Coverage of the most important JD THEMES / AXES that are currently weak in the resume
 
 You have:
 - The JD text.

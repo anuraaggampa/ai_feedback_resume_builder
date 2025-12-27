@@ -1,14 +1,6 @@
 """
 resume_builder.py — NEXT-GEN HYBRID WEIGHTING VERSION
 -----------------------------------------------------
-This file combines:
-✔ Your original ATS-safe structure  
-✔ New JSON-analysis + skill-cluster engine  
-✔ Hybrid weighting (LLM recommended + User override)  
-✔ ≥90% JD skill coverage  
-✔ Interview QA enrichment  
-✔ Lato-based clean PDF export  
-✔ Strict markdown output  
 """
 from .resume_extractor import extract_resume_to_json
 import io
@@ -266,6 +258,200 @@ def build_jd_fit_resume_prompt(
       - LLM-inferred role type (from analysis)
       - User override slider (Home → weighting section)
     """
+### HARD + SOFT SKILL + COMPETENCY GROUNDING (DO NOT IGNORE)
+
+Use these lists as the base skill dictionary:
+
+HARD_SKILL_EXAMPLES:
+{HARD_SKILL_EXAMPLES}
+
+SOFT_SKILL_EXAMPLES:
+{SOFT_SKILL_EXAMPLES}
+
+From the JD, analysis, resume, and interview you MUST:
+
+1) Identify JD **hard skills**
+2) Identify JD **soft skills**
+3) Identify JD **core competencies**
+
+Definition of core competencies (READ CAREFULLY):
+- Higher-level capability themes, not just tools and not generic “good communication”.
+- Examples (non-exhaustive):
+  - Product lifecycle ownership (ideation → requirements → implementation → rollout → metrics)
+  - Root cause analysis and problem investigation
+  - Business understanding and linking work to KPIs / revenue / risk
+  - Experimentation and learning mindset (A/B testing, hypothesis-driven work)
+  - Metrics ownership and impact orientation
+  - Stakeholder management and expectation-setting
+  - Requirement gathering and problem framing
+  - Cross-functional collaboration with PM / Engineering / Business`
+
+The JD vs RESUME analysis may already contain a block like:
+- JD Core Competencies (inferred)
+- Resume Core Competencies
+- Missing / Under-emphasized Competencies
+
+You MUST read and use that information.
+
+Your job:
+- Ensure very strong coverage of **JD hard skills**, **JD soft skills**, AND **JD core competencies**
+  **ONLY where there is honest evidence** in the resume, JD, or interview.
+- If a skill or competency is completely unsupported by the original resume + interview,
+  you MUST NOT pretend the candidate has it.
+
+### HYBRID WEIGHTING (CRITICAL)
+
+You MUST combine two signals:
+
+1) **LLM ROLE-TYPE from analysis (inside JD_vs_RESUME_ANALYSIS)**
+   - If JD is technical → base weighting ≈ 70% hard / 30% soft
+   - If JD is non-technical → base weighting ≈ 25–40% hard / 60–75% soft
+   - You can also factor in which competencies are more technical (e.g. experimentation, RCA)
+     vs more behavioural (e.g. stakeholder management, collaboration).
+
+2) **USER OVERRIDE CONTROL (from the UI sliders)**
+   User selected:
+   - HARD = {user_weighting.get('hard', 70)}%
+   - SOFT = {user_weighting.get('soft', 30)}%
+
+Your FINAL weighting MUST blend:
+- 50% LLM-inferred role type weighting
+- 50% User override weighting
+
+Example final weighting calculation (conceptual):
+- llm_hard_percent = 70 (technical JD) or maybe 30 (non-technical JD)
+- user_hard_percent = {user_weighting.get('hard', 70)}
+- final_hard = average(llm_hard_percent, user_hard_percent)
+- final_soft = 100 - final_hard
+
+You MUST apply final_hard / final_soft in:
+- Summary ordering (which clusters appear first)
+- Top bullets in Experience
+- Skill cluster ordering
+- Project emphasis
+- Achievement clustering and phrasing
+
+### USE CLUSTERS (NOT INDIVIDUAL SKILLS)
+
+You MUST group skills and competencies into meaningful clusters, not isolated tokens.
+
+Correct examples:
+- "SQL + Python + Power BI for dashboarding and ad-hoc analysis"
+- "ETL + data pipelines + automation to productionize reporting"
+- "Experimentation + A/B testing + metric definition for product decisions"
+- "Communication + stakeholder management + presentation to senior leadership"
+
+Wrong:
+- Just “SQL”
+- Just “Communication”
+
+Always use short, meaningful clusters that show how tools + competencies work together.
+
+### USE INTERVIEW_QA TO PATCH MISSING INFO (BUT NEVER FABRICATE)
+
+Rules:
+- If the candidate revealed a **missing tool** in the interview → add it to Skills / Experience,
+  but only where it matches their story.
+- If the candidate gave **metrics** → convert to measurable bullets
+  (e.g. "improved model stability by 15%", "reduced turnaround time from 3 days to 4 hours").
+- If a story clarifies **ownership / decisions / impact / collaboration** → rewrite as a strong achievement.
+- If the interview reveals evidence for a **previously missing competency** (e.g. product lifecycle, RCA,
+  stakeholder management, experimentation mindset) → highlight that in at least one bullet.
+- DO NOT fabricate stories or tools that are not present in either:
+  - ORIGINAL_RESUME
+  - INTERVIEW_QA
+
+INTERVIEW DATA:
+{json.dumps(interview_qa, indent=2)}
+
+### REUSE OF ORIGINAL RESUME CONTENT (VERY IMPORTANT)
+
+You MUST treat ORIGINAL_RESUME as the primary source of truth for the candidate's experience.
+
+Rules:
+- Do NOT ignore useful content from the user’s resume.
+- For each role and section:
+  - Read all ORIGINAL resume bullets and responsibilities.
+  - Reuse as much content as possible by REWRITING and REORGANIZING it to align with:
+    - the JD themes (axes),
+    - the gaps in JD_vs_RESUME_ANALYSIS,
+    - and any clarifications in INTERVIEW_QA.
+- You MAY:
+  - Merge or split bullets.
+  - Rephrase bullets to use JD language and emphasize JD themes.
+  - Compress clearly low-priority or outdated details into shorter bullets.
+- You MUST NOT:
+  - Invent new roles, companies, dates, or responsibilities.
+  - Add tools/skills/technologies that do not appear in ORIGINAL_RESUME or INTERVIEW_QA.
+- Prefer to TRANSFORM existing bullets over dropping them. Only drop an item if it is:
+  - obviously irrelevant to the JD (e.g., totally unrelated part-time work), or
+  - redundant with a stronger bullet you have already rewritten.
+- The goal is to orchestrate the user’s real history around the JD themes and gaps,
+  not to replace their history with something new.
+
+### HOW TO USE JD_vs_RESUME_ANALYSIS (INCLUDING COMPETENCIES + AXES)
+
+JD_vs_RESUME_ANALYSIS can include:
+- Hard skill coverage and gaps
+- Soft skill coverage and gaps
+- Role type
+- gap_analysis JSON (hard/soft gaps, focus areas, suggested questions)
+- competency_analysis (JD competencies, resume competencies, missing competencies, explanation)
+- **JD Theme Coverage (Axes)**:
+  - A list of 3–6 major themes the JD cares about (e.g. "AI/ML enablement", "KPI governance", "Stakeholder management").
+  - For each axis: importance (0–1), coverage (0–1), and a weighted score.
+
+You MUST:
+- Pay special attention to:
+  - "Missing_HARD_SKILLS" / "Missing Soft" / "Missing Competencies" / similar fields.
+  - The **JD Theme Coverage (Axes)** section:
+    - Treat axes with **high importance** and **low coverage** as PRIORITY areas to emphasize in:
+      - SUMMARY (positioning and themes).
+      - SKILLS (ordering and grouping, not inventing new skills).
+      - EXPERIENCE bullets (which projects/achievements to highlight and how to frame them).
+    - Axes with high coverage can be kept strong but do not need additional padding.
+- Use the axes to decide *what this JD actually cares about most* and bias the resume toward those themes,
+  **without inventing new roles, tools, or projects**.
+
+### WEAVING MISSING SKILLS & COMPETENCIES INTO THE RESUME
+
+You MUST use the missing skill / competency information from JD_vs_RESUME_ANALYSIS to GUIDE HOW you rewrite and emphasize content.
+
+- "Missing_HARD_SKILLS" / "Missing Soft" / "Missing Competencies" indicate:
+  - Areas where the JD expects stronger evidence than what the current resume shows.
+
+Weaving logic:
+- DO NOT add a missing skill or competency unless there is honest evidence for it in:
+  - ORIGINAL_RESUME, or
+  - INTERVIEW_QA.
+- When there *is* evidence (even weakly worded), you should:
+  - Rewrite existing bullets to make that skill/competency more explicit and JD-aligned.
+  - Group that skill into the most relevant skill cluster in the SKILLS section.
+  - Connect it to at least one real project or responsibility in EXPERIENCE.
+
+Examples:
+- If "experimentation" or "A/B testing" is missing, but the resume or interview mentions "testing variants" or "running experiments":
+  - Rewrite a bullet to say something like:
+    "Designed and ran experiments (A/B tests) to compare variants and improve [metric], demonstrating an experimentation mindset."
+- If a JD tool (e.g. "Spark") is missing and there is NO mention of it anywhere:
+  - Do NOT add "Spark" to the resume.
+- If the JD demands "stakeholder management" and the resume describes "working with business teams" without naming it:
+  - Rewrite a bullet to explicitly mention stakeholder collaboration/management, staying faithful to the described work.
+
+In short:
+- Use missing skills/competencies as a MAP of where to strengthen the resume,
+  but ONLY by:
+  - exposing and rewriting real evidence already present,
+  - not by fabricating new capabilities.
+
+### OUTPUT STRUCTURE (STRICT)
+
+The final resume MUST follow EXACTLY this structure and order:
+
+# NAME
+TITLE
+Contact Line
+
 
     previous_block = f"\nPREVIOUS_ATTEMPT_RESUME:\n{previous_resume}\n" if previous_resume else ""
     feedback_block = f"\nJUDGE_FEEDBACK:\n{judge_feedback}\n" if judge_feedback else ""
@@ -273,7 +459,6 @@ def build_jd_fit_resume_prompt(
     return f"""
 You are an ATS-optimized resume writer with strict structure rules.
 important instructions:If the resume does not explicitly state years of experience
-===============================================================
 ### HARD + SOFT SKILL GROUNDING (DO NOT IGNORE)
 Use these lists as the base dictionary:
 
@@ -288,7 +473,6 @@ Your job:
 - Identify JD soft skills  
 - Ensure ≥ 90% coverage in the FINAL RESUME  
 
-===============================================================
 ### HYBRID WEIGHTING (CRITICAL)
 
 You MUST combine two signals:
@@ -317,7 +501,6 @@ You MUST apply final_hard / final_soft in:
 - Projects emphasis  
 - Achievement clustering  
 
-===============================================================
 ### USE CLUSTERS (NOT INDIVIDUAL SKILLS)
 
 Correct examples:
@@ -332,7 +515,6 @@ Wrong:
 
 Always use skill clusters.
 
-===============================================================
 ### USE INTERVIEW_QA TO PATCH MISSING INFO
 
 Rules:
@@ -344,7 +526,6 @@ Rules:
 INTERVIEW DATA:
 {json.dumps(interview_qa, indent=2)}
 
-===============================================================
 ### OUTPUT STRUCTURE (STRICT)
 
 The final resume MUST follow EXACTLY:
@@ -364,10 +545,11 @@ Rules:
 - No new sections  
 - No reordering  
 - No tables  
+### INPUT CONTEXT (DO NOT IGNORE)
+
 - No icons except contact line emojis  
 - All bullets must start with strong verbs  
 - Summary must use the weighted skill clusters  
-===============================================================
 JOB_DESCRIPTION:
 {jd_text}
 
@@ -379,9 +561,33 @@ JD_vs_RESUME_ANALYSIS:
 
 {previous_block}
 {feedback_block}
+### FINAL OUTPUT FORMAT
+
+Your output MUST be a single, well-formatted Markdown resume with the exact sections:
+
+# NAME
+TITLE
+Contact Line
+
+Summary
+Experience
+Education
+Key Achievements
+Skills
+Projects
+
+- No extra commentary.
+- No JSON.
+- No explanations.
+- Your output MUST be pure markdown, with NO commentary.
 
 Your output MUST be pure markdown, with NO commentary.
 """
+
+
+# ============================================================
+# JD-FIT RESUME GENERATION (HYBRID + CLUSTER MODEL)
+# ============================================================
 
 
 # ============================================================
@@ -423,6 +629,10 @@ def generate_single_jd_fit_resume(
 
     return md_normalized
 
+
+# ============================================================
+# STRICT LLM-AS-JUDGE SCORING
+# ============================================================
 
 # ============================================================
 # STRICT LLM-AS-JUDGE SCORING
