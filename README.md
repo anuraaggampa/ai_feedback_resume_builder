@@ -32,6 +32,9 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 streamlit run app.py
 ```
+## System Architecture
+![Architecture](assets/architecture.png)
+
 
 ## Safety & Honesty
 - No hallucinated skills or metrics
